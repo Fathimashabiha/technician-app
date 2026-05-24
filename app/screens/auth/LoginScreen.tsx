@@ -66,8 +66,8 @@ export default function LoginScreen() {
 
           {/* Card */}
           <View style={styles.card}>
-            <Text style={styles.welcomeTitle}>Welcome back</Text>
-            <Text style={styles.welcomeSub}>Enter your email address to continue</Text>
+            <Text style={styles.welcomeTitle}>Welcome to ZenFix</Text>
+            <Text style={styles.welcomeSub}>Sign in with your email to continue</Text>
 
             {/* Email Input */}
             <View style={styles.inputRow}>

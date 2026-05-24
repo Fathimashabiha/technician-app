@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "tech-tango-go-mobile",
-    "slug": "tech-tango-go-mobile",
+    "name": "ZenFix",
+    "slug": "zenfix",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -12,7 +12,7 @@
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
-    "scheme": "tech-tango-go-mobile",
+    "scheme": "zenfix",
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
@@ -28,7 +28,7 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.fathimashabiha.techtangogomobile",
+      "package": "com.fathimashabiha.zenfix",
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
@@ -64,10 +64,6 @@
       ],
       "expo-video"
     ],
-    "extra": {
-      "eas": {
-        "projectId": "e5f288b9-7f0d-44e8-aa48-ee2cc2d4e2e6"
-      }
-    }
+    "extra": {}
   }
 }
