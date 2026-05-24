@@ -64,6 +64,11 @@
       ],
       "expo-video"
     ],
-    "extra": {}
+    "extra": {
+      "eas": {
+        "projectId": "958d74a7-8ac9-4426-9baa-f3c6db002dbf"
+      }
+    },
+    "owner": "shabsfathima"
   }
 }
