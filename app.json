@@ -1,0 +1,73 @@
+{
+  "expo": {
+    "name": "tech-tango-go-mobile",
+    "slug": "tech-tango-go-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "scheme": "tech-tango-go-mobile",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Camera access is used to scan asset QR codes and capture maintenance photos and videos.",
+        "NSMicrophoneUsageDescription": "Microphone access is used to record voice notes and video with audio.",
+        "NSPhotoLibraryUsageDescription": "Photo library access lets you attach existing photos to work orders."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "package": "com.fathimashabiha.techtangogomobile",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow photo library access to attach images to work orders.",
+          "cameraPermission": "Allow camera access to capture photos and videos for work orders."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow microphone access to record voice notes for work orders."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow camera access to scan asset QR codes and capture maintenance media.",
+          "microphonePermission": "Allow microphone access to record video with audio.",
+          "recordAudioAndroid": true
+        }
+      ],
+      "expo-video"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "e5f288b9-7f0d-44e8-aa48-ee2cc2d4e2e6"
+      }
+    }
+  }
+}
