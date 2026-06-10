@@ -13,14 +13,15 @@ import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import type { RootStackParamList, TabParamList, MoreStackParamList } from '@/app/types/navigation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-  Calendar, Search, Shield, Gauge, 
+  Calendar, Search, Shield, Gauge,
   BarChart3, LogOut, ChevronRight,
-  AlertTriangle, User, CheckCircle
+  AlertTriangle, User, CheckCircle, Box,
 } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { PageHeader } from '@/components/PageHeader';
 import { Card } from '@/components/ui/Card';
 import { useTheme } from '@/app/constants/theme';
+import { clearTechnicianSession } from '@/lib/technicianSession';
 import Animated, { FadeInUp } from 'react-native-reanimated';
 
 type NavigationProp = CompositeNavigationProp<BottomTabNavigationProp<TabParamList>, NativeStackNavigationProp<RootStackParamList>>;
@@ -36,6 +37,7 @@ export default function MoreScreen() {
     {
       title: 'Modules',
       items: [
+        { icon: Box, label: 'Assets', screen: 'Assets', color: '#0d94881A', iconColor: '#0d9488' },
         { icon: Calendar, label: 'PPM Schedule', screen: 'PPM', color: colors.primary + '1A', iconColor: colors.primary },
         { icon: Search, label: 'Inspections', screen: 'Inspections', color: colors.secondary + '1A', iconColor: colors.secondary },
         { icon: AlertTriangle, label: 'Snagging', screen: 'Snagging', color: colors.warning + '1A', iconColor: colors.warning },
@@ -58,12 +60,15 @@ export default function MoreScreen() {
     if (!screen) return;
     if (label === 'Timesheet') {
       navigation.navigate('History', { screen: 'HistoryHome', params: { tab: 'timesheet' } });
+    } else if (screen === 'Assets') {
+      navigation.navigate('Dashboard', { screen: 'Assets' } as never);
     } else {
       navigation.navigate('More', { screen });
     }
   };
 
   const handleSignOut = () => {
+    clearTechnicianSession();
     navigation.reset({
       index: 0,
       routes: [{ name: 'Login' as any }],

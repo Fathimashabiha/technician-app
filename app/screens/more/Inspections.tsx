@@ -21,9 +21,12 @@ import { Card } from '@/components/ui/Card';
 import { COLORS, SHADOWS, useTheme } from '@/app/constants/theme';
 import { SignaturePad } from '@/components/ui/SignaturePad';
 import Animated, { FadeInUp, FadeInRight, Layout, FadeInDown } from 'react-native-reanimated';
-import { workOrders, checklistItems as initialChecklist } from '@/data/mockData';
+import type { WorkOrder } from '@/lib/types/workOrder';
+import type { AssetChecklistItem } from '@/lib/types/assetDocuments';
+import { fetchAssetChecklist } from '@/lib/assetDocumentsService';
+import { useWorkOrders } from '@/lib/hooks/useWorkOrders';
 
-type Inspection = typeof workOrders[0];
+type Inspection = WorkOrder;
 type InspectionState = 'list' | 'form' | 'summary' | 'signature';
 
 const { width } = Dimensions.get('window');
@@ -33,11 +36,10 @@ export default function InspectionsScreen({ route }: any) {
   const navigation = useNavigation<any>();
   const { colors, isDark } = useTheme();
   const styles = getStyles(colors);
+  const { workOrders } = useWorkOrders();
   const [viewState, setViewState] = useState<InspectionState>(route?.params?.woId ? 'form' : 'list');
-  const [activeIns, setActiveIns] = useState<Inspection | null>(
-    route?.params?.woId ? workOrders.find(w => w.id === route.params.woId) || null : null
-  );
-  const [checklist, setChecklist] = useState(initialChecklist);
+  const [activeIns, setActiveIns] = useState<Inspection | null>(null);
+  const [checklist, setChecklist] = useState<AssetChecklistItem[]>([]);
   const [isFinishing, setIsFinishing] = useState(false);
   const [techSigned, setTechSigned] = useState(false);
   const [custSigned, setCustSigned] = useState(false);
@@ -46,16 +48,28 @@ export default function InspectionsScreen({ route }: any) {
   const [techKey, setTechKey] = useState(0);
   const [custKey, setCustKey] = useState(0);
 
-  const inspectionsList = workOrders.filter(w => w.type === 'Inspection');
+  const inspectionsList = workOrders.filter((w) => w.type === 'Inspection');
 
-  // Template Filtering Logic
-  const getCategorizedChecklist = (title: string) => {
-    if (title.includes('Fire')) return initialChecklist.filter(i => i.section.includes('Safety') || i.section.includes('Pre-Inspection'));
-    if (title.includes('HVAC')) return initialChecklist.filter(i => i.section.includes('Coil') || i.section.includes('Filter'));
-    return initialChecklist;
-  };
+  React.useEffect(() => {
+    if (route?.params?.woId) {
+      const found = workOrders.find((w) => w.id === route.params.woId) ?? null;
+      setActiveIns(found);
+      if (found) setViewState('form');
+    }
+  }, [route?.params?.woId, workOrders]);
 
-  const currentChecklist = activeIns ? getCategorizedChecklist(activeIns.title) : [];
+  React.useEffect(() => {
+    const assetRef = activeIns?.assetId;
+    if (!assetRef || assetRef === 'N/A') {
+      setChecklist([]);
+      return;
+    }
+    void fetchAssetChecklist(assetRef)
+      .then((rows) => setChecklist(rows.map((r) => ({ ...r, status: r.status ?? null }))))
+      .catch(() => setChecklist([]));
+  }, [activeIns?.assetId]);
+
+  const currentChecklist = checklist;
   const completedCount = checklist.filter(i => i.status && currentChecklist.some(c => c.id === i.id)).length;
   const progress = currentChecklist.length > 0 ? completedCount / currentChecklist.length : 0;
   
@@ -97,8 +111,8 @@ export default function InspectionsScreen({ route }: any) {
     } else {
       setViewState('list');
       setActiveIns(null);
-      setChecklist(initialChecklist); // Reset for next time
-      Alert.alert('Finalized', 'Inspection report and Corrective WOs have been synchronized.');
+      setChecklist([]);
+      Alert.alert('Finalized', 'Inspection report and Reactive WOs have been synchronized.');
     }
   };
 
@@ -235,7 +249,7 @@ export default function InspectionsScreen({ route }: any) {
                </View>
             </Card>
 
-            <Text style={styles.summaryTitle}>Corrective Actions Required</Text>
+            <Text style={styles.summaryTitle}>Reactive Actions Required</Text>
             {results.fail > 0 ? (
                <View style={styles.failList}>
                   {checklist.filter(i => i.status === 'fail' && currentChecklist.some(c => c.id === i.id)).map(item => (
@@ -490,7 +504,7 @@ const getStyles = (colors: any) => StyleSheet.create({
   summaryBtn: { height: 56, borderRadius: 16, marginBottom: 40 },
   signatureContainer: { flex: 1, padding: 24 },
   signLabel: { fontSize: 16, fontWeight: '700', color: colors.foreground, marginBottom: 20 },
-  signPad: { height: 200, backgroundColor: colors.card, borderRadius: 24, borderWidth: 2, borderColor: colors.border + '20', borderStyle: 'dashed', alignItems: 'center', justifyContent: 'center', gap: 12 },
+  signPad: { height: 200, backgroundColor: '#FFFFFF', borderRadius: 24, borderWidth: 2, borderColor: colors.border + '20', borderStyle: 'dashed', alignItems: 'center', justifyContent: 'center', gap: 12 },
   signHint: { fontSize: 14, color: colors.mutedForeground, opacity: 0.5 },
   clearBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, alignSelf: 'center', padding: 16 },
   clearText: { fontSize: 13, fontWeight: '600', color: colors.mutedForeground },
@@ -502,7 +516,7 @@ const getStyles = (colors: any) => StyleSheet.create({
   instructionsText: { fontSize: 14, color: colors.mutedForeground, lineHeight: 22, marginBottom: 24 },
   signSectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 },
   signSectionTitle: { fontSize: 14, fontWeight: '800', color: colors.foreground, textTransform: 'uppercase', letterSpacing: 0.5 },
-  signPadSigned: { borderStyle: 'solid', borderColor: colors.primary + '30', backgroundColor: colors.primary + '08' },
+  signPadSigned: { borderStyle: 'solid', borderColor: colors.primary + '30', backgroundColor: '#FFFFFF' },
   signTouchArea: { flex: 1, width: '100%', alignItems: 'center', justifyContent: 'center' },
   mockSignContent: { alignItems: 'center', justifyContent: 'center' },
   cursiveText: { fontSize: 28, color: colors.foreground, transform: [{ rotate: '-4deg' }], marginTop: -15, fontWeight: '300', fontStyle: 'italic' },
@@ -521,4 +535,4 @@ const getStyles = (colors: any) => StyleSheet.create({
   checkItemType: { fontSize: 11, color: colors.mutedForeground, marginTop: 2 },
   checkActions: { flexDirection: 'row', gap: 8 },
   miniBtn: { width: 32, height: 32, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.panel },
-});
+});

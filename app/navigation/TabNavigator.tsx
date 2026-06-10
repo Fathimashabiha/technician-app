@@ -16,10 +16,24 @@ import HSEScreen from '@/app/screens/more/HSE';
 import InspectionsScreen from '@/app/screens/more/Inspections';
 import MeterReadingScreen from '@/app/screens/more/MeterReading';
 import PPMScreen from '@/app/screens/more/PPM';
+import PpmExecutionDetailsScreen from '@/app/screens/more/ppmExecutionDetails';
+import PPMExecutionRedirect from '@/app/screens/more/PPMExecution';
+import PhotoCaptureScreen from '@/app/screens/maintenance/PhotoCaptureScreen';
+import ChecklistScreen from '@/app/screens/maintenance/ChecklistScreen';
+import SignatureScreen from '@/app/screens/maintenance/SignatureScreen';
+import PartsUsageScreen from '@/app/screens/maintenance/PartsUsage';
+import AssetScannerScreen from '@/app/screens/scan/AssetScannerScreen';
+import AssetDetailsScreen from '@/app/screens/maintenance/AssetDetailsScreen';
+import LocationDetailsScreen from '@/app/screens/maintenance/LocationDetailsScreen';
+import ProcedureScreen from '@/app/screens/maintenance/ProcedureScreen';
 import SnaggingScreen from '@/app/screens/more/Snagging';
 import TimesheetScreen from '@/app/screens/more/Timesheet';
 import WorkOrderDetailsScreen from '@/app/screens/maintenance/workOrderDetails';
-import PartsUsageScreen from '@/app/screens/maintenance/PartsUsage';
+import NavigateSiteScreen from '@/app/screens/maintenance/NavigateSiteScreen';
+import WorkOrderResultScreen from '@/app/screens/maintenance/WorkOrderResultScreen';
+import DiagnosisScreen from '@/app/screens/maintenance/Diagnosis';
+import CreateWorkOrderScreen from '@/app/screens/maintenance/CreateWorkOrderScreen';
+import RequestListScreen from '@/app/screens/maintenance/RequestListScreen';
 
 const Tab = createBottomTabNavigator<TabParamList>();
 const Stack = createNativeStackNavigator();
@@ -33,23 +47,21 @@ function HomeStack() {
       <Stack.Screen name="Inspections" component={InspectionsScreen} />
       <Stack.Screen name="MeterReading" component={MeterReadingScreen} />
       <Stack.Screen name="PPM" component={PPMScreen} />
+      <Stack.Screen name="PpmExecutionDetails" component={PpmExecutionDetailsScreen} />
+      <Stack.Screen name="PPMExecution" component={PPMExecutionRedirect} />
+      <Stack.Screen name="WorkOrderQRScan" component={AssetScannerScreen} />
+      <Stack.Screen name="PhotoCapture" component={PhotoCaptureScreen} />
+      <Stack.Screen name="Checklist" component={ChecklistScreen} />
+      <Stack.Screen name="Signature" component={SignatureScreen} />
+      <Stack.Screen name="PartsUsage" component={PartsUsageScreen} />
+      <Stack.Screen name="AssetDetails" component={AssetDetailsScreen} />
+      <Stack.Screen name="LocationDetails" component={LocationDetailsScreen} />
+      <Stack.Screen name="Procedure" component={ProcedureScreen} />
       <Stack.Screen name="Snagging" component={SnaggingScreen} />
       <Stack.Screen name="Timesheet" component={TimesheetScreen} />
     </Stack.Navigator>
   );
 }
-
-import NavigateSiteScreen from '@/app/screens/maintenance/NavigateSiteScreen';
-import PhotoCaptureScreen from '@/app/screens/maintenance/PhotoCaptureScreen';
-import ChecklistScreen from '@/app/screens/maintenance/ChecklistScreen';
-import SignatureScreen from '@/app/screens/maintenance/SignatureScreen';
-import WorkOrderResultScreen from '@/app/screens/maintenance/WorkOrderResultScreen';
-import ProcedureScreen from '@/app/screens/maintenance/ProcedureScreen';
-import DiagnosisScreen from '../screens/maintenance/Diagnosis';
-import AssetDetailsScreen from '@/app/screens/maintenance/AssetDetailsScreen';
-import AssetScannerScreen from '@/app/screens/scan/AssetScannerScreen';
-import CreateWorkOrderScreen from '@/app/screens/maintenance/CreateWorkOrderScreen';
-import RequestListScreen from '@/app/screens/maintenance/RequestListScreen';
 
 function MaintenanceStack() {
   return (
@@ -65,7 +77,9 @@ function MaintenanceStack() {
       <Stack.Screen name="WorkOrderResult" component={WorkOrderResultScreen} />
       <Stack.Screen name="Procedure" component={ProcedureScreen} />
       <Stack.Screen name="AssetDetails" component={AssetDetailsScreen} />
+      <Stack.Screen name="LocationDetails" component={LocationDetailsScreen} />
       <Stack.Screen name="WorkOrderQRScan" component={AssetScannerScreen} />
+      <Stack.Screen name="PpmExecutionDetails" component={PpmExecutionDetailsScreen} />
       <Stack.Screen name="CreateWorkOrder" component={CreateWorkOrderScreen} />
       <Stack.Screen name="RequestList" component={RequestListScreen} />
     </Stack.Navigator>
@@ -76,7 +90,9 @@ function ScanStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="AssetScanHome" component={AssetScannerScreen} />
+      <Stack.Screen name="PpmExecutionDetails" component={PpmExecutionDetailsScreen} />
       <Stack.Screen name="AssetDetails" component={AssetDetailsScreen} />
+      <Stack.Screen name="LocationDetails" component={LocationDetailsScreen} />
     </Stack.Navigator>
   );
 }
@@ -94,6 +110,7 @@ function HistoryStack() {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="HistoryHome" component={HistoryScreen} />
       <Stack.Screen name="WorkOrderDetails" component={WorkOrderDetailsScreen} />
+      <Stack.Screen name="PpmExecutionDetails" component={PpmExecutionDetailsScreen} />
     </Stack.Navigator>
   );
 }

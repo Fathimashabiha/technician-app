@@ -4,11 +4,11 @@
     "slug": "zenfix",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/zenfix-logo.jpeg",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/zenfix-logo.jpeg",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
@@ -16,6 +16,9 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        },
         "NSCameraUsageDescription": "Camera access is used to scan asset QR codes and capture maintenance photos and videos.",
         "NSMicrophoneUsageDescription": "Microphone access is used to record voice notes and video with audio.",
         "NSPhotoLibraryUsageDescription": "Photo library access lets you attach existing photos to work orders."
@@ -23,9 +26,10 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/zenfix-logo.jpeg",
         "backgroundColor": "#ffffff"
       },
+      "usesCleartextTraffic": true,
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.fathimashabiha.zenfix",
@@ -38,7 +42,7 @@
       ]
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/zenfix-logo.jpeg"
     },
     "plugins": [
       [
@@ -62,7 +66,9 @@
           "recordAudioAndroid": true
         }
       ],
-      "expo-video"
+      "expo-video",
+      "expo-asset",
+      "expo-font"
     ],
     "extra": {
       "eas": {

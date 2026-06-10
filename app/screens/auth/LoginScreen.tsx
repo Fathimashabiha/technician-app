@@ -14,11 +14,12 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
-import { ChevronRight, Shield, Mail } from 'lucide-react-native';
+import { ChevronRight, Shield, Mail, Eye, EyeOff } from 'lucide-react-native';
 import { useNavigation } from '@react-navigation/native';
 import { LIGHT_COLORS, LIGHT_GRADIENTS, SHADOWS } from '@/app/constants/theme';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '@/app/types/navigation';
+import { login } from '@/lib/authService';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -28,16 +29,24 @@ const C = LIGHT_COLORS;
 export default function LoginScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<NavigationProp>();
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState('tech@spacezen.com');
+  const [password, setPassword] = useState('password123');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
 
-  const handleLogin = () => {
-    if (!email.includes('@')) return;
+  const handleLogin = async () => {
+    if (!email.includes('@') || !password) return;
     setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
+    setError('');
+    try {
+      await login(email.trim(), password);
       navigation.replace('Main', undefined);
-    }, 1500);
+    } catch (err: any) {
+      setError(err.message ?? 'Login failed');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -67,7 +76,9 @@ export default function LoginScreen() {
           {/* Card */}
           <View style={styles.card}>
             <Text style={styles.welcomeTitle}>Welcome to ZenFix</Text>
-            <Text style={styles.welcomeSub}>Sign in with your email to continue</Text>
+            <Text style={styles.welcomeSub}>Sign in with your technician account</Text>
+
+            {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
             {/* Email Input */}
             <View style={styles.inputRow}>
@@ -83,17 +94,44 @@ export default function LoginScreen() {
               />
             </View>
 
+            <View style={[styles.inputRow, { marginTop: 12 }]}>
+              <Shield size={18} color={C.mutedForeground} style={{ marginLeft: 14 }} />
+              <TextInput
+                style={styles.passwordInput}
+                placeholder="Password"
+                placeholderTextColor={C.mutedForeground}
+                secureTextEntry={!showPassword}
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={password}
+                onChangeText={setPassword}
+              />
+              <TouchableOpacity
+                onPress={() => setShowPassword((v) => !v)}
+                style={styles.eyeButton}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+                accessibilityRole="button"
+              >
+                {showPassword ? (
+                  <EyeOff size={20} color={C.mutedForeground} />
+                ) : (
+                  <Eye size={20} color={C.mutedForeground} />
+                )}
+              </TouchableOpacity>
+            </View>
+
             <TouchableOpacity
               onPress={handleLogin}
-              disabled={loading || !email.includes('@')}
+              disabled={loading || !email.includes('@') || !password}
               activeOpacity={0.85}
               style={{ marginTop: 24 }}
             >
               <LinearGradient
-                colors={email.includes('@') ? LIGHT_GRADIENTS.primary as any : [C.muted, C.muted]}
+                colors={email.includes('@') && password ? LIGHT_GRADIENTS.primary as any : [C.muted, C.muted]}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 0 }}
-                style={[styles.loginButton, !email.includes('@') && { opacity: 0.5 }]}
+                style={[styles.loginButton, (!email.includes('@') || !password) && { opacity: 0.5 }]}
               >
                 {loading ? (
                   <ActivityIndicator color="#FFF" />
@@ -159,6 +197,11 @@ const styles = StyleSheet.create({
     color: C.mutedForeground,
     marginBottom: 28,
   },
+  errorText: {
+    fontSize: 13,
+    color: '#DC2626',
+    marginBottom: 12,
+  },
   inputRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -174,6 +217,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     fontSize: 16,
     color: C.foreground,
+  },
+  passwordInput: {
+    flex: 1,
+    paddingLeft: 12,
+    paddingRight: 4,
+    fontSize: 16,
+    color: C.foreground,
+  },
+  eyeButton: {
+    paddingHorizontal: 14,
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   loginButton: {
     height: 56,

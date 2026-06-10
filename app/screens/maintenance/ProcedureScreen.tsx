@@ -1,12 +1,14 @@
-import React from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { MaintenanceStackParamList } from '@/app/types/navigation';
 import { ArrowLeft, FileText, Video, BookOpen, AlertCircle, FileSearch } from 'lucide-react-native';
 import { useTheme } from '@/app/constants/theme';
-import { manuals, assets } from '@/data/mockData';
+import { fetchExternalAsset } from '@/lib/assetService';
+import { fetchAssetManuals } from '@/lib/assetDocumentsService';
+import type { AssetManual } from '@/lib/types/assetDocuments';
 
 type NavigationProp = NativeStackNavigationProp<MaintenanceStackParamList, 'Procedure'>;
 type RouteType = RouteProp<MaintenanceStackParamList, 'Procedure'>;
@@ -17,8 +19,27 @@ export default function ProcedureScreen() {
   const { colors, isDark, shadows } = useTheme();
   const { assetId } = route.params;
 
-  const targetAsset = assets.find(a => a.id === assetId);
-  const relevantManuals = manuals.filter(m => m.assetId === assetId);
+  const [assetName, setAssetName] = useState(String(assetId));
+  const [relevantManuals, setRelevantManuals] = useState<AssetManual[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [asset, manuals] = await Promise.all([
+          fetchExternalAsset(assetId),
+          fetchAssetManuals(assetId),
+        ]);
+        setAssetName(asset.name);
+        setRelevantManuals(manuals);
+      } catch {
+        setAssetName(String(assetId));
+        setRelevantManuals([]);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [assetId]);
 
   const getIcon = (type: string) => {
     switch (type) {
@@ -44,7 +65,9 @@ export default function ProcedureScreen() {
         </TouchableOpacity>
         <View style={styles.headerTextWrap}>
           <Text style={styles.headerTitle}>Manuals & Procedures</Text>
-          <Text style={styles.headerSubtitle}>{targetAsset ? `${targetAsset.id} - ${targetAsset.name}` : assetId}</Text>
+          <Text style={styles.headerSubtitle}>
+            {loading ? 'Loading…' : `${assetId} - ${assetName}`}
+          </Text>
         </View>
       </View>
 

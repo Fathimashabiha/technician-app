@@ -2,31 +2,34 @@ import { View, Text, StyleSheet } from "react-native";
 import { QrCode } from "lucide-react-native";
 import { isExpoCameraAvailable } from "@/lib/nativeMedia";
 import { COLORS } from "@/app/constants/theme";
+import type { AssetQrScannerProps } from "./AssetQrScannerNative";
 
-type Props = {
-  onScanSuccess: (data: string) => void;
-  isResolving?: boolean;
-  errorMessage?: string | null;
-};
+export type { AssetQrScannerProps };
 
-function AssetQrScannerFallback({ errorMessage }: Pick<Props, "errorMessage">) {
+function AssetQrScannerFallback({
+  errorMessage,
+  layout = "inline",
+}: Pick<AssetQrScannerProps, "errorMessage" | "layout">) {
+  const isFull = layout === "full" || layout === "embedded";
   return (
-    <View style={styles.fallbackBox}>
+    <View style={[styles.fallbackBox, isFull && styles.fallbackFull]}>
       <View style={styles.iconWrap}>
         <QrCode size={36} color={COLORS.primary} />
       </View>
       <Text style={styles.title}>QR camera not available</Text>
       <Text style={styles.sub}>
-        Live QR scanning needs a dev build with expo-camera. Use manual entry below to continue.
+        Live scanning needs a dev build with expo-camera. Use manual entry below.
       </Text>
       {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
     </View>
   );
 }
 
-export default function AssetQrScanner(props: Props) {
+export default function AssetQrScanner(props: AssetQrScannerProps) {
   if (!isExpoCameraAvailable()) {
-    return <AssetQrScannerFallback errorMessage={props.errorMessage} />;
+    return (
+      <AssetQrScannerFallback errorMessage={props.errorMessage} layout={props.layout} />
+    );
   }
 
   const AssetQrScannerNative = require("./AssetQrScannerNative").default;
@@ -35,13 +38,14 @@ export default function AssetQrScanner(props: Props) {
 
 const styles = StyleSheet.create({
   fallbackBox: {
-    flex: 1,
     alignItems: "center",
     justifyContent: "center",
     padding: 24,
     backgroundColor: "#f8fafc",
-    minHeight: 280,
+    height: 240,
+    borderRadius: 20,
   },
+  fallbackFull: { flex: 1, height: undefined, borderRadius: 0 },
   iconWrap: {
     width: 72,
     height: 72,

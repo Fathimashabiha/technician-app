@@ -28,7 +28,7 @@ export default function WorkOrderResultScreen() {
           </TouchableOpacity>
           <View style={styles.headerText}>
             <Text style={styles.woId}>{id}</Text>
-            <Text style={styles.woSubtitle}>Corrective Action Required</Text>
+            <Text style={styles.woSubtitle}>Reactive Action Required</Text>
           </View>
         </View>
 
@@ -58,7 +58,7 @@ export default function WorkOrderResultScreen() {
 
             <View style={styles.stepRow}>
               <View style={styles.stepBubbleWaiting}><Text style={styles.stepTextWaiting}>2</Text></View>
-              <Text style={styles.stepLabelWaiting}>Corrective action will be determined</Text>
+              <Text style={styles.stepLabelWaiting}>Reactive action will be determined</Text>
               <Text style={styles.statusBadgeWaiting}>Waiting</Text>
             </View>
 

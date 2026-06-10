@@ -1,7 +1,16 @@
-import React, { useState, useRef, useMemo, useImperativeHandle, forwardRef } from 'react';
+import React, {
+  useState,
+  useRef,
+  useMemo,
+  useImperativeHandle,
+  forwardRef,
+  useEffect,
+} from 'react';
 import { View, StyleSheet, PanResponder, Dimensions } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
-import { COLORS } from '@/app/constants/theme';
+
+/** Ink color for signatures — always black regardless of app theme. */
+export const SIGNATURE_INK_COLOR = '#000000';
 
 export type SignaturePadRef = {
   clear: () => void;
@@ -11,31 +20,68 @@ export type SignaturePadRef = {
 
 interface SignaturePadProps {
   onSignatureChange: (hasSignature: boolean) => void;
+  onPathsChange?: (paths: string[]) => void;
   height?: number;
   width?: number;
   strokeColor?: string;
+  clearKey?: number;
 }
 
 export const SignaturePad = forwardRef<SignaturePadRef, SignaturePadProps>(
-  ({ onSignatureChange, height = 200, width, strokeColor = COLORS.foreground }, ref) => {
+  (
+    {
+      onSignatureChange,
+      onPathsChange,
+      height = 200,
+      width,
+      strokeColor = SIGNATURE_INK_COLOR,
+      clearKey = 0,
+    },
+    ref,
+  ) => {
     const [paths, setPaths] = useState<string[]>([]);
     const [activePath, setActivePath] = useState<string>('');
 
     const pathRef = useRef<string>('');
+    const pathsRef = useRef<string[]>([]);
+    const onSignatureChangeRef = useRef(onSignatureChange);
+    const onPathsChangeRef = useRef(onPathsChange);
     const containerWidth = width || Dimensions.get('window').width - 64;
+
+    pathsRef.current = paths;
+
+    useEffect(() => {
+      onSignatureChangeRef.current = onSignatureChange;
+    }, [onSignatureChange]);
+
+    useEffect(() => {
+      onPathsChangeRef.current = onPathsChange;
+    }, [onPathsChange]);
+
+    useEffect(() => {
+      onSignatureChangeRef.current(paths.length > 0);
+      onPathsChangeRef.current?.(paths);
+    }, [paths]);
 
     const clear = () => {
       setPaths([]);
       setActivePath('');
       pathRef.current = '';
-      onSignatureChange(false);
     };
 
-    useImperativeHandle(ref, () => ({
-      clear,
-      getPaths: () => paths,
-      hasSignature: () => paths.length > 0,
-    }));
+    useEffect(() => {
+      clear();
+    }, [clearKey]);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        clear,
+        getPaths: () => pathsRef.current,
+        hasSignature: () => pathsRef.current.length > 0,
+      }),
+      [],
+    );
 
     const panResponder = useMemo(
       () =>
@@ -57,17 +103,13 @@ export const SignaturePad = forwardRef<SignaturePadRef, SignaturePadProps>(
           onPanResponderRelease: () => {
             if (pathRef.current) {
               const finalPath = pathRef.current;
-              setPaths((prev) => {
-                const next = [...prev, finalPath];
-                onSignatureChange(next.length > 0);
-                return next;
-              });
+              setPaths((prev) => [...prev, finalPath]);
             }
             pathRef.current = '';
             setActivePath('');
           },
         }),
-      [onSignatureChange],
+      [],
     );
 
     return (
@@ -107,8 +149,9 @@ SignaturePad.displayName = 'SignaturePad';
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: 'transparent',
+    backgroundColor: '#FFFFFF',
     overflow: 'hidden',
+    borderRadius: 12,
   },
   svg: {
     flex: 1,

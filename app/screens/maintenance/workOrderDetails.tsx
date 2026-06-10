@@ -15,11 +15,26 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { MaintenanceStackParamList } from '@/app/types/navigation';
-import { workOrders, assets } from '@/data/mockData';
+import type { Asset } from '@/lib/types/asset';
+import type { Location } from '@/lib/types/location';
+import type { WorkOrderDetail } from '@/lib/types/workOrder';
+import { fetchExternalAsset } from '@/lib/assetService';
+import { fetchExternalLocation } from '@/lib/locationService';
+import {
+  fetchWorkOrderDetail,
+} from '@/lib/workOrderService';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Card } from '@/components/ui/Card';
 import { COLORS, GRADIENTS, SHADOWS, useTheme } from '@/app/constants/theme';
 import { LinearGradient } from 'expo-linear-gradient';
+import {
+  buildStepPayloadFromUi,
+  completeWorkOrder,
+  completeWorkOrderStep,
+  holdWorkOrder,
+  resumeWorkOrder,
+  startWorkOrder,
+} from '@/lib/workOrderService';
 import {
   ArrowLeft,
   MapPin,
@@ -66,9 +81,12 @@ export default function WorkOrderDetails() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<NavigationProp>();
   const route = useRoute<RouteType>();
-  const { id } = route.params as any;
+  const { id, pendingApproval: pendingApprovalParam } = route.params;
 
-  const wo = workOrders.find(w => w.id === id);
+  const [wo, setWo] = useState<WorkOrderDetail | null>(null);
+  const [asset, setAsset] = useState<Asset | null>(null);
+  const [locationDetails, setLocationDetails] = useState<Location | null>(null);
+  const [woLoading, setWoLoading] = useState(true);
 
 
 
@@ -92,6 +110,7 @@ export default function WorkOrderDetails() {
   const [transferredTo, setTransferredTo] = useState<string | null>(null);
   const [showAssignConfirm, setShowAssignConfirm] = useState(false);
   const [pendingTech, setPendingTech] = useState<any>(null);
+  const [backendBusy, setBackendBusy] = useState(false);
 
   const AVAILABLE_TECHS = [
     { id: 'T002', name: 'Sarah Connor', role: 'HVAC Specialist', status: 'Available', avatar: 'SC' },
@@ -110,56 +129,162 @@ export default function WorkOrderDetails() {
     { id: 'qr_scan',      label: 'Verify Asset',       desc: 'Scan asset QR to verify',              Icon: Camera,       action: 'Verify Asset' },
     { id: 'before_photos',label: 'Before Photos',     desc: 'Capture photos before starting work',  Icon: Camera,       action: 'Take Photos' },
     { id: 'checklist',    label: 'Execute Checklist', desc: 'Complete all checklist items',          Icon: ClipboardList,action: 'Open Checklist' },
-    { id: 'diagnostics',  label: 'Diagnostic Notes',  desc: (checklistResult === 'fail' || wo?.type === 'Corrective') ? 'Rectification Required: Address failed items' : 'Identify faults and root causes',       Icon: Activity,     action: 'Record Diagnosis' },
+    { id: 'diagnostics',  label: 'Diagnostic Notes',  desc: checklistResult === 'fail' ? 'Rectification Required: Address failed items' : 'Identify faults and root causes',       Icon: Activity,     action: 'Record Diagnosis' },
     { id: 'parts',        label: 'Parts Used',        desc: 'Record and update materials used',      Icon: Package,      action: 'Update Parts' },
     { id: 'after_photos', label: 'After Photos',      desc: 'Capture photos after completing work',  Icon: ImageIcon,    action: 'Take After Photos' },
     { id: 'signature',    label: 'Digital Signature', desc: 'Sign off on the completed work',        Icon: PenLine,      action: 'Sign Off' },
     { id: 'submit',       label: 'Submit & Complete', desc: 'Submit work order for verification',    Icon: Send,         action: 'Submit Work Order' },
   ];
 
-  const workflowSteps = (wo?.type === 'Inspection' 
-    ? STEPS
-    : (wo?.type === 'Breakdown' || wo?.type === 'Corrective')
-      ? STEPS.filter(s => s.id !== 'checklist')
-      : STEPS.filter(s => s.id !== 'diagnostics'))
-    .filter(s => wo?.scope === 'location' ? s.id !== 'qr_scan' : true);
+  const workflowSteps = React.useMemo(() => {
+    let steps =
+      wo?.type === 'Inspection'
+        ? STEPS
+        : wo?.type === 'Reactive' || wo?.type === 'Corrective' || wo?.type === 'PPM'
+          ? STEPS
+          : wo?.type === 'Breakdown'
+            ? STEPS.filter((s) => s.id !== 'checklist')
+            : STEPS.filter((s) => s.id !== 'diagnostics');
 
-  const asset = assets.find(a => a.id === wo?.assetId);
+    if (wo?.scope === 'location') {
+      steps = steps.map((s) =>
+        s.id === 'qr_scan'
+          ? {
+              ...s,
+              label: 'Verify Location',
+              desc: 'Scan location QR to verify you are on site',
+              action: 'Verify Location',
+            }
+          : s
+      );
+    }
 
-  // Reset internal state completely when opening a different work order
+    return steps;
+  }, [wo?.type, wo?.scope]);
+
   useEffect(() => {
-    const workOrder = workOrders.find(w => w.id === id);
-    if (!workOrder) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        setWoLoading(true);
+        const detail = await fetchWorkOrderDetail(id);
+        if (cancelled) return;
+        setWo(detail);
 
-    // If WO is already final, jump to completion state
-    const isFinal = ['Completed', 'Verified', 'Closed'].includes(workOrder.status);
-    if (isFinal) {
-      setCurrentStep(workflowSteps.length);
-    } else {
-      setCurrentStep(0);
-    }
+        let steps =
+          detail.type === 'Inspection'
+            ? STEPS
+            : detail.type === 'Reactive' || detail.type === 'Corrective' || detail.type === 'PPM'
+              ? STEPS
+              : detail.type === 'Breakdown'
+                ? STEPS.filter((s) => s.id !== 'checklist')
+                : STEPS.filter((s) => s.id !== 'diagnostics');
 
-    setTimerActive(false);
-    setIsPaused(false);
-    setHoldReason('');
-    setNote('');
-    
-    // For Corrective WOs, pre-populate failed items to rectify
-    if (workOrder.type === 'Corrective') {
-      setFailedChecklistItems([
-        { label: 'Mechanical Seal Condition', status: 'fail', note: 'Visible leakage detected in previous inspection' },
-        { label: 'System Operating Vibration', status: 'flag', note: 'Higher than normal decibel levels' }
-      ]);
-    } else {
-      setFailedChecklistItems([]);
-    }
-  }, [id, workflowSteps.length]);
+        if (detail.scope === 'location') {
+          steps = steps.map((s) =>
+            s.id === 'qr_scan'
+              ? {
+                  ...s,
+                  label: 'Verify Location',
+                  desc: 'Scan location QR to verify you are on site',
+                  action: 'Verify Location',
+                }
+              : s
+          );
+        }
+
+        const isFinal = ['Completed', 'Verified', 'Closed'].includes(detail.status);
+        if (isFinal) {
+          setCurrentStep(steps.length);
+        } else if (detail.execution) {
+          setCurrentStep(detail.execution.currentStepIndex);
+          setIsPaused(
+            detail.status === 'On Hold' || detail.execution.status === 'OnHold'
+          );
+          if (detail.execution.onHoldReason) {
+            setHoldReason(detail.execution.onHoldReason);
+          }
+        } else {
+          setCurrentStep(0);
+        }
+
+        setTimerActive(false);
+        setNote('');
+
+        setFailedChecklistItems([]);
+
+        if (detail.scope === 'location' && detail.locationRef) {
+          setAsset(null);
+          try {
+            const loadedLocation = await fetchExternalLocation(detail.locationRef);
+            if (!cancelled) setLocationDetails(loadedLocation);
+          } catch {
+            if (!cancelled) setLocationDetails(null);
+          }
+        } else if (detail.assetId && detail.assetId !== 'N/A') {
+          setLocationDetails(null);
+          try {
+            const loadedAsset = await fetchExternalAsset(detail.assetId);
+            if (!cancelled) setAsset(loadedAsset);
+          } catch {
+            if (!cancelled) setAsset(null);
+          }
+        } else {
+          setAsset(null);
+          setLocationDetails(null);
+        }
+      } catch {
+        if (!cancelled) setWo(null);
+      } finally {
+        if (!cancelled) setWoLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
   useEffect(() => {
     const p = route.params as any;
     if (p?.stepCompleted) {
       setIsAutoNavigating(true);
       const stepId = p.stepCompleted;
+
+      // Persist every completed step. For evidence steps, upload actual media files.
+      try {
+        const payload = buildStepPayloadFromUi(p, stepId, wo?.assetId);
+        const uploadFiles =
+          stepId === 'before_photos' || stepId === 'after_photos'
+            ? ((p?.evidence as Array<Record<string, unknown>> | undefined) ?? [])
+                .filter((item) => typeof item?.uri === 'string' && item.uri)
+                .map((item) => {
+                  const mediaType =
+                    item.type === 'video'
+                      ? 'video'
+                      : item.type === 'audio'
+                        ? 'audio'
+                        : 'photo';
+                  const mime =
+                    mediaType === 'video'
+                      ? 'video/mp4'
+                      : mediaType === 'audio'
+                        ? 'audio/m4a'
+                        : 'image/jpeg';
+                  return {
+                    uri: String(item.uri),
+                    name: String(item.fileName ?? `${mediaType}-${item.id ?? Date.now()}`),
+                    type: mime,
+                  };
+                })
+            : undefined;
+
+        void completeWorkOrderStep(id, stepId, payload, uploadFiles).catch((error: any) => {
+          const message = error?.message || 'Unable to save step to server.';
+          Alert.alert('Sync failed', message);
+        });
+      } catch (error: any) {
+        Alert.alert('Sync failed', error?.message || 'Unable to save step to server.');
+      }
       
       if (p.checklistResult) {
         setChecklistResult(p.checklistResult);
@@ -264,7 +389,13 @@ export default function WorkOrderDetails() {
     if (!wo) return;
 
     if (stepId === 'qr_scan') {
-      navigation.navigate('WorkOrderQRScan' as any, { id: wo.id, assetId: wo.assetId } as any);
+      navigation.navigate('WorkOrderQRScan' as any, {
+        id: wo.id,
+        assetId: wo.assetId,
+        scope: wo.scope ?? 'asset',
+        location: wo.location,
+        locationRef: wo.locationRef ?? null,
+      } as any);
     } else if (stepId === 'before_photos') {
       navigation.navigate('PhotoCapture' as any, { id: wo.id, type: 'before' } as any);
     } else if (stepId === 'checklist') {
@@ -286,6 +417,9 @@ export default function WorkOrderDetails() {
       navigation.navigate('Signature' as any, { id: wo.id } as any);
     } else if (stepId === 'submit') {
       setTimerActive(false);
+      void completeWorkOrder(wo.id).catch(() => {
+        // ignore for UI smoothness
+      });
       navigation.navigate('WorkOrderResult' as any, { id: wo.id, status: statusOverride || checklistResult } as any);
     }
   };
@@ -326,6 +460,16 @@ useEffect(() => {
     }
   };
 
+  if (woLoading) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <ActivityIndicator size="large" color={colors.primary} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   if (!wo) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
@@ -341,14 +485,24 @@ useEffect(() => {
     );
   }
 
+  const isPendingApproval =
+    Boolean(pendingApprovalParam) || wo?.status === 'Pending Approval';
   const isDone = currentStep >= workflowSteps.length;
   const activeStep = workflowSteps[Math.min(currentStep, workflowSteps.length - 1)];
 
-  const handleAction = () => {
+  const handleAction = async () => {
     if (isDone || transferredTo) return;
     const step = activeStep.id;
 
     if (step === 'start') {
+      setBackendBusy(true);
+      try {
+        await startWorkOrder(id);
+      } catch (e: any) {
+        Alert.alert('Sync error', e?.message ?? 'Failed to start work order');
+      } finally {
+        setBackendBusy(false);
+      }
       setTimerActive(true);
       setCurrentStep(prev => prev + 1);
       // Auto-trigger navigation to the next step immediately
@@ -396,7 +550,7 @@ useEffect(() => {
             <Text style={[{ fontSize: 13, fontWeight: '700', color: colors.warning }, isPaused && { color: colors.mutedForeground }]}>{formatTime(elapsed)}</Text>
           </View>
         )}
-        {!timerActive && !isDone && (
+        {!timerActive && !isDone && !isPendingApproval && (
           <TouchableOpacity 
             onPress={() => setShowTransferForm(true)} 
             style={[styles.backButton, { marginLeft: 12, marginRight: 0, backgroundColor: colors.primary + '15' }]}
@@ -434,11 +588,33 @@ useEffect(() => {
         </Card>
 
         {/* ── Asset & Work Order Details Card ── */}
-        <TouchableOpacity onPress={() => navigation.navigate('AssetDetails' as any, { assetId: wo.assetId } as any)} activeOpacity={0.9}>
+        <TouchableOpacity
+          onPress={() => {
+            if (wo.scope === 'location' && (locationDetails?.id || wo.locationRef)) {
+              navigation.navigate('LocationDetails' as any, {
+                locationId: locationDetails?.id ?? wo.locationRef,
+              } as any);
+              return;
+            }
+            if (wo.assetId && wo.assetId !== 'N/A') {
+              navigation.navigate('AssetDetails' as any, { assetId: wo.assetId } as any);
+            }
+          }}
+          activeOpacity={0.9}
+        >
           <Card style={styles.assetCard}>
-            {/* Asset Header */}
+            {/* Asset / Location Header */}
             <View style={styles.assetHeaderBg}>
-              {asset ? (
+              {wo.scope === 'location' ? (
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.assetNameText, { color: colors.foreground }]}>
+                    {locationDetails?.name ?? wo.assetName ?? 'Location'}
+                  </Text>
+                  <Text style={[styles.assetModelText, { color: colors.mutedForeground }]}>
+                    {locationDetails?.locationId ?? wo.locationRef ?? wo.location}
+                  </Text>
+                </View>
+              ) : asset ? (
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.assetNameText, { color: colors.foreground }]}>{asset.name}</Text>
                   <Text style={[styles.assetModelText, { color: colors.mutedForeground }]}>{asset.type} • {asset.id}</Text>
@@ -528,8 +704,20 @@ useEffect(() => {
 
 
 
+        {isPendingApproval && (
+          <View style={[styles.pendingBanner, { backgroundColor: colors.warning + '18', borderColor: colors.warning + '40' }]}>
+            <Clock size={18} color={colors.warning} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.pendingTitle, { color: colors.warning }]}>Awaiting FM approval</Text>
+              <Text style={[styles.pendingDesc, { color: colors.mutedForeground }]}>
+                This request is in the work order webapp. Once a manager approves and assigns it, it will appear in your Tasks list.
+              </Text>
+            </View>
+          </View>
+        )}
+
         {/* ── Active Wizard Step ── */}
-        {!isDone && (
+        {!isDone && !isPendingApproval && (
           <Animated.View key={activeStep.id} entering={FadeInUp} style={styles.activeStepContainer}>
              <View style={styles.stepHeader}>
                 <View style={styles.stepIconBubble}>
@@ -628,8 +816,19 @@ useEffect(() => {
                         style={styles.holdSubmitBtn} 
                         onPress={() => {
                           if (!holdReason.trim()) return;
-                          setIsPaused(true);
-                          setShowHoldForm(false);
+                          setBackendBusy(true);
+                          void holdWorkOrder(wo.id, holdReason)
+                            .then(() => {
+                              setIsPaused(true);
+                              setShowHoldForm(false);
+                            })
+                            .catch((e: any) => {
+                              Alert.alert(
+                                'Sync error',
+                                e?.message ?? 'Failed to put work order on hold'
+                              );
+                            })
+                            .finally(() => setBackendBusy(false));
                         }}
                       >
                                                 <Text style={styles.holdSubmitText}>Submit Hold</Text>
@@ -672,7 +871,20 @@ useEffect(() => {
                 {isPaused ? (
                     <TouchableOpacity 
                       style={styles.floatBtn} 
-                      onPress={() => setIsPaused(false)}
+                      onPress={async () => {
+                        setBackendBusy(true);
+                        try {
+                          await resumeWorkOrder(wo.id);
+                        } catch (e: any) {
+                          Alert.alert(
+                            'Sync error',
+                            e?.message ?? 'Failed to resume work order'
+                          );
+                        } finally {
+                          setBackendBusy(false);
+                        }
+                        setIsPaused(false);
+                      }}
                     >
                       <Play size={18} color={colors.foreground} />
                       <Text style={styles.floatBtnText}>Resume Work</Text>
@@ -1045,6 +1257,16 @@ const getStyles = (colors: any, isDark: boolean) => StyleSheet.create({
     fontWeight: '700',
   },
 
+  pendingBanner: {
+    flexDirection: 'row',
+    gap: 12,
+    padding: 16,
+    borderRadius: 16,
+    borderWidth: 1,
+    marginBottom: 16,
+  },
+  pendingTitle: { fontSize: 14, fontWeight: '800', marginBottom: 4 },
+  pendingDesc: { fontSize: 12, lineHeight: 17 },
   autoNavOverlay: { ...SHADOWS.card, position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center', zIndex: 9999 },
   autoNavText: { color: '#FFF', marginTop: 16, fontSize: 16, fontWeight: '600' },
   assetHeaderBg: { padding: 12, flexDirection: 'row', alignItems: 'center' },

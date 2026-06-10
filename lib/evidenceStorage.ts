@@ -36,3 +36,27 @@ export async function saveEvidence(
   }
   await AsyncStorage.setItem(evidenceKey(workOrderId, phase), JSON.stringify(items));
 }
+
+const INTAKE_EVIDENCE_KEY = "@zenfix_intake_evidence";
+
+export async function loadIntakeEvidence(): Promise<EvidenceItem[]> {
+  try {
+    const raw = await AsyncStorage.getItem(INTAKE_EVIDENCE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw) as EvidenceItem[];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveIntakeEvidence(items: EvidenceItem[]): Promise<void> {
+  if (items.length === 0) {
+    await AsyncStorage.removeItem(INTAKE_EVIDENCE_KEY);
+    return;
+  }
+  await AsyncStorage.setItem(INTAKE_EVIDENCE_KEY, JSON.stringify(items));
+}
+
+export async function clearIntakeEvidence(): Promise<void> {
+  await AsyncStorage.removeItem(INTAKE_EVIDENCE_KEY);
+}

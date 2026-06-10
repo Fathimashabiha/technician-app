@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -10,15 +10,23 @@ import {
   Modal,
   Platform,
   Pressable,
+  Alert,
+  ActivityIndicator,
+  AppState,
+  type AppStateStatus,
 } from 'react-native';
+import { ZenFixLogo } from '@/components/ZenFixLogo';
+import { useFocusEffect } from '@react-navigation/native';
 
 const { width } = Dimensions.get('window');
 import { useNavigation } from '@react-navigation/native';
 import type { CompositeNavigationProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
-import type { RootStackParamList, TabParamList } from '@/app/types/navigation';
-import type { WorkOrder } from '@/data/mockData';
+import type { DashboardStackParamList, RootStackParamList, TabParamList } from '@/app/types/navigation';
+import type { WorkOrder } from '@/lib/types/workOrder';
+import { useWorkOrders } from '@/lib/hooks/useWorkOrders';
+import { workOrderTypeLabel } from '@/lib/workOrderService';
 import {
   Play,
   Pause,
@@ -41,16 +49,47 @@ import {
   LogOut,
   Sun,
   Moon,
+  Box,
 } from 'lucide-react-native';
 import { Button } from '@/components/ui/Button';
 import { StatusBadge } from '@/components/StatusBadge';
-import { workOrders, notifications } from '@/data/mockData';
+import { notifications } from '@/data/mockData';
 import { COLORS, GRADIENTS, SHADOWS, useTheme } from '@/app/constants/theme';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { FadeInUp, Layout } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  checkIn,
+  checkOut,
+  getAttendanceStatus,
+  type AttendanceDayState,
+  type AttendanceStatusDto,
+} from '@/lib/attendanceService';
+import {
+  getLocalShiftSession,
+  saveLocalShiftSession,
+  shiftElapsedSeconds,
+  endOfLocalDayMs,
+  shouldMarkAbsentAfterMidnight,
+  getLocalDayAttendance,
+  saveLocalDayAttendance,
+} from '@/lib/attendanceLocal';
+import { getTechnicianSession } from '@/lib/technicianSession';
+import { ApiError } from '@/lib/api';
+import { clearTechnicianSession } from '@/lib/technicianSession';
+import {
+  dueDateKey,
+  isDueOnDate,
+  isOpenPpmSchedule,
+  listMyPpmSchedules,
+  ppmStatusForBadge,
+  type PpmSchedule,
+} from '@/lib/ppmService';
 
-type NavigationProp = CompositeNavigationProp<BottomTabNavigationProp<TabParamList>, NativeStackNavigationProp<RootStackParamList>>;
+type NavigationProp = CompositeNavigationProp<
+  NativeStackNavigationProp<DashboardStackParamList>,
+  CompositeNavigationProp<BottomTabNavigationProp<TabParamList>, NativeStackNavigationProp<RootStackParamList>>
+>;
 
 
 export default function DashboardScreen() {
@@ -58,36 +97,278 @@ export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
   const { colors, gradients, isDark, toggleTheme, shadows } = useTheme();
   const dynamicStyles = getStyles(colors, isDark);
-  const [shiftActive, setShiftActive] = useState(false);
+  const [shiftPhase, setShiftPhase] = useState<AttendanceDayState>('can_check_in');
+  const [shiftStartedAt, setShiftStartedAt] = useState<number | null>(null);
+  const [shiftEndedAt, setShiftEndedAt] = useState<number | null>(null);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [filter, setFilter] = useState<'All' | 'Breakdown' | 'PPM' | 'Inspection' | 'Corrective' | 'In Progress' | 'Completed' | 'Pending'>('All');
+  const [filter, setFilter] = useState<
+    'All' | 'Breakdown' | 'PPM' | 'Inspection' | 'Reactive' | 'In Progress' | 'Completed' | 'Pending'
+  >('All');
   const [activeNotice, setActiveNotice] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [attendanceBusy, setAttendanceBusy] = useState(false);
+  const { workOrders, loading: woLoading, reload: reloadWorkOrders } = useWorkOrders();
+  const [ppmSchedules, setPpmSchedules] = useState<PpmSchedule[]>([]);
+  const [ppmLoading, setPpmLoading] = useState(false);
   const unreadCount = notifications.filter(n => !n.read).length;
+  const priorShiftAlertShown = useRef(false);
+
+  const applyServerDay = useCallback(
+    async (status: AttendanceStatusDto, technicianId: string) => {
+      setShiftPhase(status.dayState);
+
+      const started =
+        (status.shiftStartedAt && new Date(status.shiftStartedAt).getTime()) ||
+        (status.lastCheckIn && new Date(status.lastCheckIn).getTime()) ||
+        null;
+      const ended =
+        (status.shiftEndedAt && new Date(status.shiftEndedAt).getTime()) ||
+        (status.lastCheckOut && new Date(status.lastCheckOut).getTime()) ||
+        null;
+
+      if (status.dayState === 'on_shift' && started) {
+        setShiftStartedAt(started);
+        setShiftEndedAt(null);
+        setElapsed(shiftElapsedSeconds(started, 'on_shift'));
+        await saveLocalShiftSession(
+          true,
+          status.technicianName,
+          started,
+          technicianId,
+        );
+        await saveLocalDayAttendance(
+          { dateKey: '', dayState: 'on_shift', startedAt: started },
+          technicianId,
+        );
+        return;
+      }
+
+      if (status.dayState === 'checked_out') {
+        setShiftStartedAt(started);
+        setShiftEndedAt(ended);
+        setElapsed(
+          started && ended
+            ? Math.max(0, Math.floor((ended - started) / 1000))
+            : 0,
+        );
+        await saveLocalShiftSession(false, undefined, undefined, technicianId);
+        await saveLocalDayAttendance(
+          {
+            dateKey: '',
+            dayState: 'checked_out',
+            startedAt: started ?? undefined,
+            endedAt: ended ?? undefined,
+          },
+          technicianId,
+        );
+        return;
+      }
+
+      if (status.dayState === 'absent') {
+        const absentEnded =
+          ended ?? (started != null ? endOfLocalDayMs(started) : null);
+        setShiftStartedAt(started);
+        setShiftEndedAt(absentEnded);
+        setElapsed(
+          started != null
+            ? shiftElapsedSeconds(started, 'absent', absentEnded)
+            : 0,
+        );
+        await saveLocalShiftSession(false, undefined, undefined, technicianId);
+        await saveLocalDayAttendance(
+          {
+            dateKey: '',
+            dayState: 'absent',
+            startedAt: started ?? undefined,
+            endedAt: absentEnded ?? undefined,
+          },
+          technicianId,
+        );
+        return;
+      }
+
+      setShiftStartedAt(null);
+      setShiftEndedAt(null);
+      setElapsed(0);
+      await saveLocalShiftSession(false, undefined, undefined, technicianId);
+    },
+    [],
+  );
+
+  const syncAttendance = useCallback(async () => {
+    const tech = getTechnicianSession();
+    const technicianId = tech?.technicianId;
+    if (!technicianId) return;
+
+    try {
+      const status = await getAttendanceStatus(technicianId);
+      if ('dayState' in status) {
+        await applyServerDay(status, technicianId);
+        if (status.priorShiftUnclosed && !priorShiftAlertShown.current) {
+          priorShiftAlertShown.current = true;
+          Alert.alert(
+            'Previous shift not closed',
+            'Yesterday’s shift was closed automatically. You may be marked absent for that day.',
+          );
+        }
+        return;
+      }
+    } catch {
+      // fall through to local cache
+    }
+
+    const applyAbsentFromOpenShift = async (startedAt: number) => {
+      const endedAt = endOfLocalDayMs(startedAt);
+      setShiftPhase('absent');
+      setShiftStartedAt(startedAt);
+      setShiftEndedAt(endedAt);
+      setElapsed(shiftElapsedSeconds(startedAt, 'absent', endedAt));
+      await saveLocalShiftSession(false, undefined, undefined, technicianId);
+      await saveLocalDayAttendance(
+        { dateKey: '', dayState: 'absent', startedAt, endedAt },
+        technicianId,
+      );
+    };
+
+    const localDay = await getLocalDayAttendance(technicianId);
+    if (localDay) {
+      if (
+        localDay.dayState === 'on_shift' &&
+        localDay.startedAt &&
+        shouldMarkAbsentAfterMidnight('on_shift', localDay.startedAt)
+      ) {
+        await applyAbsentFromOpenShift(localDay.startedAt);
+        return;
+      }
+
+      setShiftPhase(localDay.dayState);
+      if (localDay.dayState === 'on_shift' && localDay.startedAt) {
+        setShiftStartedAt(localDay.startedAt);
+        setShiftEndedAt(null);
+        setElapsed(shiftElapsedSeconds(localDay.startedAt, 'on_shift'));
+        return;
+      }
+      if (localDay.dayState === 'checked_out') {
+        setShiftStartedAt(localDay.startedAt ?? null);
+        setShiftEndedAt(localDay.endedAt ?? null);
+        if (localDay.startedAt && localDay.endedAt) {
+          setElapsed(
+            shiftElapsedSeconds(
+              localDay.startedAt,
+              'checked_out',
+              localDay.endedAt,
+            ),
+          );
+        }
+        return;
+      }
+      if (localDay.dayState === 'absent') {
+        const endedAt =
+          localDay.endedAt ??
+          (localDay.startedAt ? endOfLocalDayMs(localDay.startedAt) : null);
+        setShiftStartedAt(localDay.startedAt ?? null);
+        setShiftEndedAt(endedAt);
+        setElapsed(
+          localDay.startedAt
+            ? shiftElapsedSeconds(localDay.startedAt, 'absent', endedAt)
+            : 0,
+        );
+        return;
+      }
+    }
+
+    const local = await getLocalShiftSession(technicianId);
+    if (local?.active && local.startedAt) {
+      if (shouldMarkAbsentAfterMidnight('on_shift', local.startedAt)) {
+        await applyAbsentFromOpenShift(local.startedAt);
+        return;
+      }
+      setShiftPhase('on_shift');
+      setShiftStartedAt(local.startedAt);
+      setElapsed(shiftElapsedSeconds(local.startedAt, 'on_shift'));
+    }
+  }, [applyServerDay]);
+
+  const reloadPpmSchedules = useCallback(async () => {
+    setPpmLoading(true);
+    try {
+      const rows = await listMyPpmSchedules();
+      setPpmSchedules(rows.filter((r) => !!r.id && !!r.dueDate));
+    } catch {
+      setPpmSchedules([]);
+    } finally {
+      setPpmLoading(false);
+    }
+  }, []);
 
   const onRefresh = React.useCallback(() => {
     setRefreshing(true);
-    setTimeout(() => {
-      setRefreshing(false);
-    }, 2000);
-  }, []);
+    Promise.all([syncAttendance(), reloadWorkOrders(), reloadPpmSchedules()]).finally(() =>
+      setRefreshing(false),
+    );
+  }, [syncAttendance, reloadWorkOrders, reloadPpmSchedules]);
   
   const handleSignOutFinal = () => {
     setShowProfileModal(false);
+    clearTechnicianSession();
     navigation.reset({
       index: 0,
       routes: [{ name: 'Login' as any }],
     });
   };
 
+  // Wall-clock timer while on shift; freeze at midnight if check-out was missed.
   useEffect(() => {
-    let timer: ReturnType<typeof setInterval>;
-    if (shiftActive) {
-      timer = setInterval(() => setElapsed(e => e + 1), 1000);
-    }
+    if (shiftPhase !== 'on_shift' || shiftStartedAt == null) return;
+
+    const tick = () => {
+      if (shouldMarkAbsentAfterMidnight('on_shift', shiftStartedAt)) {
+        const endedAt = endOfLocalDayMs(shiftStartedAt);
+        const technicianId = getTechnicianSession()?.technicianId;
+        setShiftPhase('absent');
+        setShiftEndedAt(endedAt);
+        setElapsed(shiftElapsedSeconds(shiftStartedAt, 'absent', endedAt));
+        if (technicianId) {
+          void saveLocalShiftSession(false, undefined, undefined, technicianId);
+          void saveLocalDayAttendance(
+            {
+              dateKey: '',
+              dayState: 'absent',
+              startedAt: shiftStartedAt,
+              endedAt,
+            },
+            technicianId,
+          );
+        }
+        return;
+      }
+      setElapsed(shiftElapsedSeconds(shiftStartedAt, 'on_shift'));
+    };
+
+    tick();
+    const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
-  }, [shiftActive]);
+  }, [shiftPhase, shiftStartedAt]);
+
+  useEffect(() => {
+    void syncAttendance();
+  }, [syncAttendance]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void syncAttendance();
+      void reloadPpmSchedules();
+    }, [syncAttendance, reloadPpmSchedules]),
+  );
+
+  useEffect(() => {
+    const onAppState = (next: AppStateStatus) => {
+      if (next === 'active') void syncAttendance();
+    };
+    const sub = AppState.addEventListener('change', onAppState);
+    return () => sub.remove();
+  }, [syncAttendance]);
 
   const formatTime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
@@ -98,24 +379,34 @@ export default function DashboardScreen() {
 
   const filtered = workOrders.filter((wo: WorkOrder) => {
     const isFinalStatus = ['Completed', 'Verified', 'Closed'].includes(wo.status);
-    
-    if (filter === 'All') return !isFinalStatus;
-    if (['Breakdown', 'PPM', 'Inspection', 'Corrective'].includes(filter)) {
-      return wo.type === filter && !isFinalStatus;
+    const isPendingApproval = wo.status === 'Pending Approval';
+
+    if (filter === 'All') return !isFinalStatus && !isPendingApproval;
+    if (['Breakdown', 'PPM', 'Inspection', 'Reactive'].includes(filter)) {
+      if (filter === 'Reactive') {
+        return (wo.type === 'Reactive' || wo.type === 'Corrective') && !isFinalStatus && !isPendingApproval;
+      }
+      return wo.type === filter && !isFinalStatus && !isPendingApproval;
     }
-    if (filter === 'Pending') return (wo.status === 'Assigned' || wo.status === 'Accepted') && !isFinalStatus;
+    if (filter === 'Pending') {
+      return (wo.status === 'Assigned' || wo.status === 'Accepted') && !isFinalStatus;
+    }
     return wo.status === filter && !isFinalStatus;
   });
 
   const stats = [
-    { label: 'Total Workorder', value: workOrders.length, icon: ClipboardCheck, color: colors.primary },
+    { label: ' Workorder', value: workOrders.length, icon: ClipboardCheck, color: colors.primary },
     { label: 'In Progress', value: workOrders.filter((w: WorkOrder) => w.status === 'In Progress').length, icon: Wrench, color: '#3B82F6' },
     { label: 'Completed', value: workOrders.filter((w: WorkOrder) => w.status === 'Completed' || w.status === 'Verified').length, icon: CheckCircle2, color: colors.success },
     { label: 'Pending', value: workOrders.filter((w: WorkOrder) => w.status === 'Assigned' || w.status === 'Accepted').length, icon: Clock, color: '#60A5FA' },
   ];
 
-  const filters: Array<'All' | 'PPM' | 'Inspection' | 'Breakdown' | 'Corrective'> = [
-    'All', 'PPM', 'Inspection', 'Breakdown', 'Corrective'
+  const filters: Array<'All' | 'PPM' | 'Inspection' | 'Breakdown' | 'Reactive'> = [
+    'All',
+    'PPM',
+    'Inspection',
+    'Breakdown',
+    'Reactive',
   ];
 
   const filterMap = ['All', 'In Progress', 'Completed', 'Pending'] as const;
@@ -129,19 +420,36 @@ export default function DashboardScreen() {
   // Quick-action grid: 5 items with unique neon accents
   const QUICK_LINKS = [
     { name: 'Work Orders', icon: FileText,      color: '#1E40AF',          bg: '#1E40AF18',              route: 'Maintenance' },
+    { name: 'Assets',      icon: Box,           color: '#0d9488',          bg: '#0d948818',              route: 'Assets' },
     { name: 'PPM',         icon: ClipboardList, color: colors.primary,    bg: colors.primary + '18',    route: 'PPM' },
     { name: 'Inspection',  icon: ShieldCheck,   color: colors.secondary,  bg: colors.secondary + '18',  route: 'Inspections' },
     { name: 'HSE',         icon: ShieldAlert,   color: colors.destructive, bg: colors.destructive + '18', route: 'HSE' },
     { name: 'Snagging',    icon: PenTool,       color: colors.accent,     bg: colors.accent + '18',     route: 'Snagging' },
-    { name: 'Meter Reading', icon: Zap,         color: '#F59E0B',          bg: '#F59E0B18',              route: 'MeterReading' },
+    {
+      name: 'Meter Reading',
+      icon: Zap,
+      color: '#F59E0B',
+      bg: '#F59E0B18',
+      route: 'MeterReading',
+      fullWidth: true,
+    },
   ];
 
   const todayStr = new Date().toISOString().split('T')[0];
-  const todayFiltered = filtered.filter((wo: WorkOrder) => {
-    if (!wo.dueDate) return true;
-    return wo.dueDate.startsWith(todayStr);
-  });
-  const displayOrders = todayFiltered;
+  const todayFiltered = filtered.filter(
+    (wo: WorkOrder) =>
+      isDueOnDate(wo.dueDate, todayStr) &&
+      wo.type !== 'PPM' &&
+      wo.type !== 'Inspection',
+  );
+
+  const isPpmTab = filter === 'PPM';
+  const isAllTab = filter === 'All';
+  const todayPpmSchedules = ppmSchedules.filter(
+    (row) =>
+      dueDateKey(row.dueDate) === todayStr &&
+      isOpenPpmSchedule(row.status),
+  );
 
   return (
     <ScrollView
@@ -163,8 +471,12 @@ export default function DashboardScreen() {
       >
         <View style={dynamicStyles.headerTop}>
           <View style={dynamicStyles.greetingGroup}>
-            <TouchableOpacity onPress={() => setShowProfileModal(true)} activeOpacity={0.7} style={dynamicStyles.avatarCircle}>
-              <Text style={dynamicStyles.avatarInitials}>AR</Text>
+            <TouchableOpacity
+              onPress={() => setShowProfileModal(true)}
+              activeOpacity={0.7}
+              style={dynamicStyles.logoButton}
+            >
+              <ZenFixLogo size="sm" />
             </TouchableOpacity>
             <View>
               <Text style={[dynamicStyles.greeting, { color: isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.5)' }]}>Good Morning</Text>
@@ -198,23 +510,98 @@ export default function DashboardScreen() {
               <Timer size={16} color={isDark ? colors.secondary : colors.primary} />
               <Text style={[dynamicStyles.shiftLabelText, { color: isDark ? 'rgba(255,255,255,0.7)' : colors.foreground }]}>Shift Timer</Text>
             </View>
-            {shiftActive && (
+            {shiftPhase === 'on_shift' && (
               <View style={[dynamicStyles.activeStatus, { backgroundColor: isDark ? 'rgba(22,101,52,0.2)' : 'rgba(22,101,52,0.1)' }]}>
                 <Text style={[dynamicStyles.activeStatusText, { color: colors.success }]}>
-                  ● Active
+                  ● On shift
+                </Text>
+              </View>
+            )}
+            {shiftPhase === 'checked_out' && (
+              <View style={[dynamicStyles.activeStatus, { backgroundColor: isDark ? 'rgba(100,116,139,0.25)' : 'rgba(100,116,139,0.15)' }]}>
+                <Text style={[dynamicStyles.activeStatusText, { color: colors.mutedForeground }]}>
+                  Checked out
+                </Text>
+              </View>
+            )}
+            {shiftPhase === 'absent' && (
+              <View style={[dynamicStyles.activeStatus, { backgroundColor: isDark ? 'rgba(185,28,28,0.25)' : 'rgba(254,226,226,0.9)' }]}>
+                <Text style={[dynamicStyles.activeStatusText, { color: colors.destructive }]}>
+                  Absent
                 </Text>
               </View>
             )}
           </View>
 
-          <Text style={[dynamicStyles.timerText, { color: isDark ? '#FFF' : colors.foreground }]}>{formatTime(elapsed)}</Text>
+          <Text style={[dynamicStyles.timerText, { color: isDark ? '#FFF' : colors.foreground }]}>
+            {shiftPhase === 'can_check_in' ? '--:--:--' : formatTime(elapsed)}
+          </Text>
+
+          {shiftPhase === 'checked_out' ? (
+            <Text style={dynamicStyles.shiftHint}>
+              You have checked out for today. Check in again tomorrow.
+            </Text>
+          ) : null}
+          {shiftPhase === 'absent' ? (
+            <Text style={dynamicStyles.shiftHint}>
+              Marked absent — no check-out before midnight. Check in to start today&apos;s shift.
+            </Text>
+          ) : null}
 
           <View style={dynamicStyles.shiftActions}>
-            {!shiftActive ? (
+            {shiftPhase === 'can_check_in' || shiftPhase === 'absent' ? (
               <TouchableOpacity
-                onPress={() => setShiftActive(true)}
+                onPress={async () => {
+                  setAttendanceBusy(true);
+                  const technicianId = getTechnicianSession()?.technicianId ?? 'T001';
+                  const name = getTechnicianSession()?.name ?? 'Technician';
+                  try {
+                    const startedAt = Date.now();
+                    await checkIn(name);
+                    await saveLocalShiftSession(true, name, startedAt, technicianId);
+                    await saveLocalDayAttendance(
+                      { dateKey: '', dayState: 'on_shift', startedAt },
+                      technicianId,
+                    );
+                    setShiftPhase('on_shift');
+                    setShiftStartedAt(startedAt);
+                    setShiftEndedAt(null);
+                    setElapsed(0);
+                  } catch (err) {
+                    const message =
+                      err instanceof ApiError
+                        ? err.message
+                        : err instanceof Error
+                          ? err.message
+                          : 'Could not reach server';
+                    if (
+                      message.includes('checked out') ||
+                      message.includes('absent')
+                    ) {
+                      Alert.alert('Cannot check in', message);
+                      void syncAttendance();
+                      return;
+                    }
+                    const startedAt = Date.now();
+                    await saveLocalShiftSession(true, name, startedAt, technicianId);
+                    await saveLocalDayAttendance(
+                      { dateKey: '', dayState: 'on_shift', startedAt },
+                      technicianId,
+                    );
+                    setShiftPhase('on_shift');
+                    setShiftStartedAt(startedAt);
+                    setElapsed(0);
+                    Alert.alert(
+                      'Checked in (offline)',
+                      `Shift timer started on this device. Sync when the server is available.\n\n${message}`,
+                    );
+                  } finally {
+                    setAttendanceBusy(false);
+                  }
+                }}
                 style={dynamicStyles.checkInButton}
                 activeOpacity={0.85}
+                disabled={attendanceBusy}
               >
                 <LinearGradient
                   colors={gradients.primary as any}
@@ -222,26 +609,94 @@ export default function DashboardScreen() {
                   end={{ x: 1, y: 0 }}
                   style={dynamicStyles.checkInGradient}
                 >
-                  <Play size={16} color="#FFF" />
-                  <Text style={dynamicStyles.checkInText}>Check In</Text>
+                  {attendanceBusy ? (
+                    <ActivityIndicator color="#FFF" size="small" />
+                  ) : (
+                    <Play size={16} color="#FFF" />
+                  )}
+                  <Text style={dynamicStyles.checkInText}>
+                    {attendanceBusy ? 'Checking in...' : 'Check In'}
+                  </Text>
                 </LinearGradient>
               </TouchableOpacity>
-            ) : (
+            ) : null}
+
+            {shiftPhase === 'on_shift' ? (
               <TouchableOpacity
-                onPress={() => { setShiftActive(false); setElapsed(0); }}
+                onPress={async () => {
+                  setAttendanceBusy(true);
+                  const technicianId = getTechnicianSession()?.technicianId ?? 'T001';
+                  const endedAt = Date.now();
+                  try {
+                    await checkOut();
+                    await saveLocalShiftSession(false, undefined, undefined, technicianId);
+                    await saveLocalDayAttendance(
+                      {
+                        dateKey: '',
+                        dayState: 'checked_out',
+                        startedAt: shiftStartedAt ?? undefined,
+                        endedAt,
+                      },
+                      technicianId,
+                    );
+                    setShiftPhase('checked_out');
+                    setShiftEndedAt(endedAt);
+                    if (shiftStartedAt) {
+                      setElapsed(
+                        Math.max(0, Math.floor((endedAt - shiftStartedAt) / 1000)),
+                      );
+                    }
+                  } catch (err) {
+                    const message =
+                      err instanceof ApiError
+                        ? err.message
+                        : err instanceof Error
+                          ? err.message
+                          : 'Could not reach server';
+                    await saveLocalShiftSession(false, undefined, undefined, technicianId);
+                    await saveLocalDayAttendance(
+                      {
+                        dateKey: '',
+                        dayState: 'checked_out',
+                        startedAt: shiftStartedAt ?? undefined,
+                        endedAt,
+                      },
+                      technicianId,
+                    );
+                    setShiftPhase('checked_out');
+                    setShiftEndedAt(endedAt);
+                    Alert.alert('Checked out (offline)', message);
+                  } finally {
+                    setAttendanceBusy(false);
+                  }
+                }}
                 style={dynamicStyles.checkInButton}
                 activeOpacity={0.8}
+                disabled={attendanceBusy}
               >
-                 <LinearGradient
+                <LinearGradient
                   colors={['#EF4444', '#B91C1C'] as any}
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 0 }}
                   style={dynamicStyles.checkInGradient}
                 >
-                  <Square size={16} color="#FFF" />
-                  <Text style={dynamicStyles.checkInText}>Check Out</Text>
+                  {attendanceBusy ? (
+                    <ActivityIndicator color="#FFF" size="small" />
+                  ) : (
+                    <Square size={16} color="#FFF" />
+                  )}
+                  <Text style={dynamicStyles.checkInText}>
+                    {attendanceBusy ? 'Checking out...' : 'Check Out'}
+                  </Text>
                 </LinearGradient>
               </TouchableOpacity>
+            ) : null}
+
+            {shiftPhase === 'checked_out' && (
+              <View style={dynamicStyles.shiftDonePanel}>
+                <CheckCircle2 size={20} color={colors.mutedForeground} />
+                <Text style={dynamicStyles.shiftDoneText}>Shift complete for today</Text>
+              </View>
             )}
           </View>
         </Animated.View>
@@ -254,7 +709,7 @@ export default function DashboardScreen() {
               <TouchableOpacity
                 activeOpacity={0.7}
                 style={dynamicStyles.summarySegment}
-                onPress={() => setFilter(filterMap[i] as any)}
+                onPress={() => setFilter(filterMap[i] as typeof filter)}
               >
                 <Text style={[dynamicStyles.summaryValue, { color: stat.color }]}>{stat.value}</Text>
                 <Text style={dynamicStyles.summaryLabel}>{stat.label}</Text>
@@ -316,7 +771,7 @@ export default function DashboardScreen() {
           <Text style={dynamicStyles.sectionLabel}>QUICK ACTIONS</Text>
         </View>
         <View style={dynamicStyles.qaGrid}>
-          {QUICK_LINKS.map((link, idx) => (
+          {QUICK_LINKS.filter((link) => !('fullWidth' in link && link.fullWidth)).map((link) => (
             <TouchableOpacity
               key={link.name}
               onPress={() => navigation.navigate(link.route as any)}
@@ -326,14 +781,41 @@ export default function DashboardScreen() {
               <View style={dynamicStyles.qaCircle}>
                 <link.icon size={24} color={link.color} />
               </View>
-              <Text style={[dynamicStyles.qaName, { color: link.color }]} numberOfLines={2}>{link.name}</Text>
+              <Text style={[dynamicStyles.qaName, { color: link.color }]} numberOfLines={2}>
+                {link.name}
+              </Text>
             </TouchableOpacity>
           ))}
         </View>
+        {QUICK_LINKS.filter((link) => 'fullWidth' in link && link.fullWidth).map((link) => (
+          <TouchableOpacity
+            key={link.name}
+            onPress={() => navigation.navigate(link.route as any)}
+            style={[
+              dynamicStyles.qaCardFull,
+              { backgroundColor: link.color + (isDark ? '20' : '0D') },
+            ]}
+            activeOpacity={0.7}
+          >
+            <View style={[dynamicStyles.qaCircle, dynamicStyles.qaCircleInline]}>
+              <link.icon size={24} color={link.color} />
+            </View>
+            <Text style={[dynamicStyles.qaNameFull, { color: link.color, flex: 1 }]}>
+              {link.name}
+            </Text>
+            <ChevronRight size={20} color={link.color} />
+          </TouchableOpacity>
+        ))}
 
         <View style={dynamicStyles.sectionHeader}>
-          <Text style={dynamicStyles.sectionLabel}>TODAY'S WORK ORDERS</Text>
-          <TouchableOpacity onPress={() => navigation.navigate('Maintenance' as any)}>
+          <Text style={dynamicStyles.sectionLabel}>
+            {isPpmTab ? "TODAY'S PPM" : "TODAY'S WORK ORDERS"}
+          </Text>
+          <TouchableOpacity
+            onPress={() =>
+              isPpmTab ? navigation.navigate('PPM') : navigation.navigate('Maintenance' as any)
+            }
+          >
             <Text style={dynamicStyles.seeAllText}>See All</Text>
           </TouchableOpacity>
         </View>
@@ -344,10 +826,10 @@ export default function DashboardScreen() {
           style={dynamicStyles.filterScroll}
           contentContainerStyle={dynamicStyles.filterContent}
         >
-          {filters.map(f => (
+          {filters.map((f) => (
             <TouchableOpacity
               key={f}
-              onPress={() => setFilter(f as any)}
+              onPress={() => setFilter(f)}
               style={[dynamicStyles.filterTab, filter === f && dynamicStyles.activeFilterTab]}
             >
               {filter === f && (
@@ -358,46 +840,161 @@ export default function DashboardScreen() {
                   style={StyleSheet.absoluteFill}
                 />
               )}
-              <Text style={[dynamicStyles.filterText, filter === f && dynamicStyles.activeFilterText]}>{f}</Text>
+              <Text style={[dynamicStyles.filterText, filter === f && dynamicStyles.activeFilterText]}>
+                {f}
+              </Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
 
         <View style={dynamicStyles.workOrders}>
-          {displayOrders.length === 0 ? (
+          {isPpmTab ? (
+            ppmLoading && todayPpmSchedules.length === 0 ? (
+              <View style={dynamicStyles.emptyState}>
+                <ActivityIndicator size="small" color={colors.primary} />
+                <Text style={dynamicStyles.emptyText}>Loading PPM tasks…</Text>
+              </View>
+            ) : todayPpmSchedules.length === 0 ? (
+              <View style={dynamicStyles.emptyState}>
+                <CheckCircle2 size={32} color={colors.mutedForeground} />
+                <Text style={dynamicStyles.emptyText}>No PPM tasks for today!</Text>
+              </View>
+            ) : (
+              todayPpmSchedules.map((schedule) => (
+                <TouchableOpacity
+                  key={`ppm-${schedule.id}`}
+                  onPress={() =>
+                    navigation.navigate('PpmExecutionDetails', {
+                      scheduleId: schedule.id,
+                      title: schedule.title,
+                    })
+                  }
+                  style={dynamicStyles.woCard}
+                  activeOpacity={0.7}
+                >
+                  <GradientBracket isDark={isDark} cardColor={colors.card} />
+                  <View style={dynamicStyles.woHeader}>
+                    <View style={dynamicStyles.woInfo}>
+                      <View style={dynamicStyles.woBadges}>
+                        <StatusBadge status="PPM" />
+                      </View>
+                      <Text style={dynamicStyles.woTitle} numberOfLines={2}>
+                        {schedule.title}
+                      </Text>
+                    </View>
+                    <ChevronRight size={16} color={colors.mutedForeground} />
+                  </View>
+                  <View style={dynamicStyles.woFooter}>
+                    <View style={dynamicStyles.woFooterMeta}>
+                      <Text style={dynamicStyles.woId} numberOfLines={1}>
+                        {schedule.ppmCode ?? schedule.id.slice(0, 8)}
+                      </Text>
+                      <Text style={dynamicStyles.woLocation} numberOfLines={1}>
+                        {dueDateKey(schedule.dueDate)}
+                      </Text>
+                    </View>
+                    <View style={dynamicStyles.woFooterBadge}>
+                      <StatusBadge status={ppmStatusForBadge(schedule.status)} />
+                    </View>
+                  </View>
+                </TouchableOpacity>
+              ))
+            )
+          ) : isAllTab && (ppmLoading || woLoading) && todayPpmSchedules.length === 0 && todayFiltered.length === 0 ? (
+            <View style={dynamicStyles.emptyState}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={dynamicStyles.emptyText}>Loading today&apos;s work…</Text>
+            </View>
+          ) : isAllTab && todayPpmSchedules.length === 0 && todayFiltered.length === 0 ? (
+            <View style={dynamicStyles.emptyState}>
+              <CheckCircle2 size={32} color={colors.mutedForeground} />
+              <Text style={dynamicStyles.emptyText}>No work orders for today!</Text>
+            </View>
+          ) : !isAllTab && !isPpmTab && todayFiltered.length === 0 ? (
             <View style={dynamicStyles.emptyState}>
               <CheckCircle2 size={32} color={colors.mutedForeground} />
               <Text style={dynamicStyles.emptyText}>No work orders for today!</Text>
             </View>
           ) : (
-            displayOrders.map((wo: WorkOrder) => (
-              <TouchableOpacity
-                key={wo.id}
-                onPress={() => navigation.navigate('Maintenance', { screen: 'WorkOrderDetails', params: { id: wo.id } })}
-                style={dynamicStyles.woCard}
-                activeOpacity={0.7}
-              >
-                <GradientBracket isDark={isDark} cardColor={colors.card} />
-                <View style={dynamicStyles.woHeader}>
-                  <View style={dynamicStyles.woInfo}>
-                    <View style={dynamicStyles.woBadges}>
-                      <StatusBadge status={wo.type} />
-                      <StatusBadge status={wo.priority} />
+            <>
+              {isAllTab &&
+                todayPpmSchedules.map((schedule) => (
+                  <TouchableOpacity
+                    key={`ppm-${schedule.id}`}
+                    onPress={() =>
+                      navigation.navigate('PpmExecutionDetails', {
+                        scheduleId: schedule.id,
+                        title: schedule.title,
+                      })
+                    }
+                    style={dynamicStyles.woCard}
+                    activeOpacity={0.7}
+                  >
+                    <GradientBracket isDark={isDark} cardColor={colors.card} />
+                    <View style={dynamicStyles.woHeader}>
+                      <View style={dynamicStyles.woInfo}>
+                        <View style={dynamicStyles.woBadges}>
+                          <StatusBadge status="PPM" />
+                        </View>
+                        <Text style={dynamicStyles.woTitle} numberOfLines={2}>
+                          {schedule.title}
+                        </Text>
+                      </View>
+                      <ChevronRight size={16} color={colors.mutedForeground} />
                     </View>
-                    <Text style={dynamicStyles.woTitle}>{wo.title}</Text>
+                    <View style={dynamicStyles.woFooter}>
+                      <View style={dynamicStyles.woFooterMeta}>
+                        <Text style={dynamicStyles.woId} numberOfLines={1}>
+                          {schedule.ppmCode ?? schedule.id.slice(0, 8)}
+                        </Text>
+                        <Text style={dynamicStyles.woLocation} numberOfLines={1}>
+                          {dueDateKey(schedule.dueDate)}
+                        </Text>
+                      </View>
+                      <View style={dynamicStyles.woFooterBadge}>
+                        <StatusBadge status={ppmStatusForBadge(schedule.status)} />
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              {todayFiltered.map((wo: WorkOrder) => (
+                <TouchableOpacity
+                  key={wo.id}
+                  onPress={() =>
+                    navigation.navigate('Maintenance', {
+                      screen: 'WorkOrderDetails',
+                      params: { id: wo.id },
+                    })
+                  }
+                  style={dynamicStyles.woCard}
+                  activeOpacity={0.7}
+                >
+                  <GradientBracket isDark={isDark} cardColor={colors.card} />
+                  <View style={dynamicStyles.woHeader}>
+                    <View style={dynamicStyles.woInfo}>
+                      <View style={dynamicStyles.woBadges}>
+                        <StatusBadge status={workOrderTypeLabel(wo.type)} />
+                        <StatusBadge status={wo.priority} />
+                      </View>
+                      <Text style={dynamicStyles.woTitle} numberOfLines={2}>
+                        {wo.title}
+                      </Text>
+                    </View>
+                    <ChevronRight size={16} color={colors.mutedForeground} />
                   </View>
-                  <ChevronRight size={16} color={colors.mutedForeground} />
-                </View>
-                <View style={dynamicStyles.woFooter}>
-                  <View style={dynamicStyles.woDetails}>
-                    <Text style={dynamicStyles.woId}>{wo.id}</Text>
-                    <Text style={dynamicStyles.dot}>•</Text>
-                    <Text style={dynamicStyles.woLocation}>{wo.location}</Text>
-                  </View>
-                  <StatusBadge status={wo.status} />
-                </View>
-              </TouchableOpacity>
-            ))
+                    <View style={dynamicStyles.woFooter}>
+                      <View style={dynamicStyles.woFooterMeta}>
+                        <Text style={dynamicStyles.woLocation} numberOfLines={2}>
+                          {wo.location}
+                        </Text>
+                      </View>
+                      <View style={dynamicStyles.woFooterBadge}>
+                        <StatusBadge status={wo.status} />
+                      </View>
+                    </View>
+                </TouchableOpacity>
+              ))}
+            </>
           )}
         </View>
       </View>
@@ -499,21 +1096,17 @@ const getStyles = (colors: any, isDark: boolean) => StyleSheet.create({
     alignItems: 'center',
     gap: 12,
   },
-  avatarCircle: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.05)',
+  logoButton: {
+    width: 52,
+    height: 52,
+    borderRadius: 14,
+    backgroundColor: isDark ? 'rgba(255,255,255,0.12)' : '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1.5,
-    borderColor: isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.1)',
-  },
-  avatarInitials: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: isDark ? '#FFF' : colors.foreground,
-    letterSpacing: 0.5,
+    borderWidth: 1,
+    borderColor: isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.06)',
+    overflow: 'hidden',
+    padding: 4,
   },
   notificationBtn: {
     width: 40,
@@ -656,6 +1249,30 @@ const getStyles = (colors: any, isDark: boolean) => StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 0.5,
   },
+  shiftHint: {
+    fontSize: 12,
+    color: colors.mutedForeground,
+    marginTop: -8,
+    marginBottom: 12,
+    lineHeight: 18,
+  },
+  shiftDonePanel: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+    borderWidth: 1,
+    borderColor: isDark ? 'rgba(255,255,255,0.08)' : colors.border,
+  },
+  shiftDoneText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.mutedForeground,
+  },
   mainContent: { paddingHorizontal: 20 },
   summaryBar: {
     flexDirection: 'row',
@@ -777,6 +1394,26 @@ const getStyles = (colors: any, isDark: boolean) => StyleSheet.create({
     letterSpacing: -0.1,
     lineHeight: 12,
   },
+  qaCardFull: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 20,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  qaCircleInline: {
+    marginBottom: 0,
+    marginRight: 4,
+  },
+  qaNameFull: {
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: -0.2,
+  },
   filterScroll: { marginBottom: 14 },
   filterContent: { gap: 8 },
   filterTab: {
@@ -825,14 +1462,23 @@ const getStyles = (colors: any, isDark: boolean) => StyleSheet.create({
     alignItems: 'flex-start',
     marginBottom: 12,
   },
-  woInfo: { flex: 1 },
-  woBadges: { flexDirection: 'row', gap: 6, marginBottom: 6 },
-  woTitle: { fontSize: 14, fontWeight: '700', color: colors.foreground },
-  woFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  woDetails: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  woId: { fontSize: 11, color: colors.mutedForeground, fontWeight: '500' },
-  woLocation: { fontSize: 11, color: colors.mutedForeground, fontWeight: '500' },
-  dot: { fontSize: 11, color: colors.mutedForeground },
+  woInfo: { flex: 1, minWidth: 0, marginRight: 8 },
+  woBadges: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 6 },
+  woTitle: { fontSize: 14, fontWeight: '700', color: colors.foreground, flexShrink: 1 },
+  woFooter: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: colors.muted + '40',
+  },
+  woFooterMeta: { flex: 1, minWidth: 0, gap: 3 },
+  woFooterBadge: { flexShrink: 0, maxWidth: '38%' },
+  woId: { fontSize: 11, color: colors.mutedForeground, fontWeight: '600' },
+  woLocation: { fontSize: 11, color: colors.mutedForeground, fontWeight: '500', lineHeight: 15 },
 });
 
 const staticStyles = StyleSheet.create({

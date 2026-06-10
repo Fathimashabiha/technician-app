@@ -1,0 +1,46 @@
+import { apiRequest } from './api';
+import { getTechnicianId } from './technicianSession';
+
+export type AttendanceDayState =
+  | 'can_check_in'
+  | 'on_shift'
+  | 'checked_out'
+  | 'absent';
+
+export type AttendanceStatusDto = {
+  technicianId: string;
+  technicianName?: string;
+  status: string;
+  lastCheckIn?: string | null;
+  lastCheckOut?: string | null;
+  dayState: AttendanceDayState;
+  priorShiftUnclosed?: boolean;
+  shiftStartedAt?: string | null;
+  shiftEndedAt?: string | null;
+};
+
+export async function checkIn(technicianName?: string) {
+  return apiRequest<{ message: string }>('/attendance/check-in', {
+    method: 'POST',
+    body: JSON.stringify({
+      technicianId: getTechnicianId(),
+      technicianName,
+    }),
+  });
+}
+
+export async function checkOut() {
+  return apiRequest<{ message: string }>('/attendance/check-out', {
+    method: 'POST',
+    body: JSON.stringify({
+      technicianId: getTechnicianId(),
+    }),
+  });
+}
+
+export async function getAttendanceStatus(technicianId: string = getTechnicianId()) {
+  return apiRequest<AttendanceStatusDto | { message: string }>(
+    `/attendance/status/${encodeURIComponent(technicianId)}`
+  );
+}
+

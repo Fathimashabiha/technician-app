@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   View, 
   Text, 
@@ -14,37 +14,62 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { ArrowLeft, Check, Flag, X as XIcon, Camera, MessageSquare, Zap, AlertTriangle, BookOpen, Pause } from 'lucide-react-native';
 import { COLORS, SHADOWS, useTheme } from '@/app/constants/theme';
 import { Button } from '@/components/ui/Button';
-
-type Category = 'PRE-INSPECTION' | 'FILTER CHECK' | 'COIL INSPECTION' | 'FINAL CHECK';
+import { fetchAssetChecklist } from '@/lib/assetDocumentsService';
+import { navigateAfterStep, getReturnScreen } from '@/lib/executionNavigation';
 
 interface Item {
   id: string;
-  category: Category;
+  category: string;
   label: string;
   type: 'boolean' | 'numeric';
 }
-
-const CHECKLIST_ITEMS: Item[] = [
-  { id: '1', category: 'PRE-INSPECTION', label: 'Verify power isolation', type: 'boolean' },
-  { id: '2', category: 'PRE-INSPECTION', label: 'Check PPE equipment', type: 'boolean' },
-  { id: '3', category: 'PRE-INSPECTION', label: 'Confirm LOTO procedure', type: 'boolean' },
-  { id: '4', category: 'FILTER CHECK', label: 'Filter condition rating', type: 'boolean' },
-  { id: '5', category: 'FILTER CHECK', label: 'Differential pressure reading (Pa)', type: 'numeric' },
-  { id: '6', category: 'FILTER CHECK', label: 'Filter seal integrity', type: 'boolean' },
-  { id: '7', category: 'COIL INSPECTION', label: 'Coil fin condition', type: 'boolean' },
-  { id: '8', category: 'COIL INSPECTION', label: 'Drain pan clean and clear', type: 'boolean' },
-  { id: '9', category: 'FINAL CHECK', label: 'System restored to operation', type: 'boolean' },
-  { id: '10', category: 'FINAL CHECK', label: 'Area cleaned and tools secured', type: 'boolean' },
-];
 
 export default function ChecklistScreen() {
   const { colors, gradients, shadows, isDark } = useTheme();
   const styles = getStyles(colors);
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
-  const { id } = route.params;
+  const { id, assetId, ppmChecklistItems } = route.params;
+  const isPpm = getReturnScreen(route.params) === 'PpmExecutionDetails';
 
+  const [checklistItems, setChecklistItems] = useState<Item[]>([]);
   const [answers, setAnswers] = useState<Record<string, { status: 'pass' | 'flag' | 'fail' | null; note: string; value: string }>>({});
+
+  useEffect(() => {
+    if (ppmChecklistItems?.length) {
+      setChecklistItems(
+        ppmChecklistItems.map((row) => ({
+          id: row.id,
+          category: row.frequency ?? 'PPM',
+          label: row.description,
+          type: 'boolean' as const,
+        }))
+      );
+      const initial: Record<string, { status: 'pass' | 'flag' | 'fail' | null; note: string; value: string }> = {};
+      for (const row of ppmChecklistItems) {
+        if (row.status === 'PASSED') initial[row.id] = { status: 'pass', note: '', value: '' };
+        else if (row.status === 'FAILED') initial[row.id] = { status: 'fail', note: '', value: '' };
+      }
+      setAnswers(initial);
+      return;
+    }
+    if (!assetId || assetId === 'N/A') {
+      setChecklistItems([]);
+      return;
+    }
+    void fetchAssetChecklist(String(assetId))
+      .then((rows) =>
+        setChecklistItems(
+          rows.map((row) => ({
+            id: row.id,
+            category: row.section,
+            label: row.item,
+            type: row.type === 'input' ? 'numeric' : 'boolean',
+          }))
+        )
+      )
+      .catch(() => setChecklistItems([]));
+  }, [assetId, ppmChecklistItems]);
 
   const handleStatus = (itemId: string, status: 'pass' | 'flag' | 'fail') => {
     setAnswers(prev => ({
@@ -58,20 +83,21 @@ export default function ChecklistScreen() {
   const flagCount = Object.values(answers).filter(a => a.status === 'flag').length;
   const failCount = Object.values(answers).filter(a => a.status === 'fail').length;
 
-  const progress = completedCount / CHECKLIST_ITEMS.length;
+  const progress =
+    checklistItems.length === 0 ? 0 : completedCount / checklistItems.length;
 
-  // Group by category
-  const grouped = CHECKLIST_ITEMS.reduce((acc, item) => {
+  const grouped = checklistItems.reduce((acc, item) => {
     if (!acc[item.category]) acc[item.category] = [];
     acc[item.category].push(item);
     return acc;
-  }, {} as Record<Category, Item[]>);
+  }, {} as Record<string, Item[]>);
 
   let bottomWarningType: 'none' | 'flag' | 'fail' = 'none';
   if (failCount > 0) bottomWarningType = 'fail';
   else if (flagCount > 0) bottomWarningType = 'flag';
 
-  const isFormComplete = completedCount === CHECKLIST_ITEMS.length;
+  const isFormComplete =
+    checklistItems.length > 0 && completedCount === checklistItems.length;
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -82,18 +108,40 @@ export default function ChecklistScreen() {
         </TouchableOpacity>
         <View style={styles.headerDetails}>
           <Text style={styles.headerTitle}>Checklist</Text>
-          <Text style={styles.headerSubtitle}>{id} • {completedCount}/10 completed</Text>
+          <Text style={styles.headerSubtitle}>
+            {id} • {completedCount}/{checklistItems.length || 0} completed
+          </Text>
         </View>
         {route.params?.assetId && (
           <TouchableOpacity 
-            onPress={() => navigation.navigate('Procedure', { assetId: route.params.assetId })}
+            onPress={() => {
+              if (isPpm && route.params.assetId) {
+                navigation.navigate('AssetDetails', {
+                  assetId: route.params.assetId,
+                  scheduleId: route.params.scheduleId ?? id,
+                  returnTo: 'PpmExecutionDetails',
+                  initialView: 'manuals',
+                } as any);
+              } else {
+                navigation.navigate('Procedure', { assetId: route.params.assetId });
+              }
+            }}
             style={styles.procedureButton}
           >
             <BookOpen size={20} color={colors.primary} />
           </TouchableOpacity>
         )}
         <TouchableOpacity 
-          onPress={() => navigation.navigate('WorkOrderDetails', { id, holdWork: true } as any)} 
+          onPress={() => {
+            if (isPpm) {
+              navigation.navigate('PpmExecutionDetails', {
+                scheduleId: route.params.scheduleId ?? id,
+                holdWork: true,
+              } as any);
+            } else {
+              navigation.navigate('WorkOrderDetails', { id, holdWork: true } as any);
+            }
+          }} 
           style={styles.holdButton}
         >
           <Pause size={20} color={colors.foreground} />
@@ -115,7 +163,12 @@ export default function ChecklistScreen() {
       {/* Checklist List */}
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-          {(Object.keys(grouped) as Category[]).map(category => (
+          {checklistItems.length === 0 ? (
+            <Text style={{ color: colors.mutedForeground, textAlign: 'center', marginTop: 24 }}>
+              No checklist on this asset. Add tasks in sz-asset-service.
+            </Text>
+          ) : null}
+          {Object.keys(grouped).map(category => (
             <View key={category} style={styles.categorySection}>
               <Text style={styles.categoryTitle}>{category}</Text>
 
@@ -229,15 +282,15 @@ export default function ChecklistScreen() {
               disabled={!isFormComplete}
               onPress={() => {
                 const woType = route.params?.woType;
-                const isBreakdown = woType === 'Breakdown' || woType === 'Corrective';
+                const isBreakdown = woType === 'Breakdown';
 
-                if (bottomWarningType === 'fail' && !isBreakdown) {
+                if (bottomWarningType === 'fail' && !isBreakdown && !isPpm) {
                   navigation.navigate('WorkOrderResult', { id, status: 'fail' });
                 } else {
                   const failedItems = Object.entries(answers)
                     .filter(([_, ans]) => ans.status === 'fail' || ans.status === 'flag')
                     .map(([id, ans]) => {
-                      const item = CHECKLIST_ITEMS.find(i => i.id === id);
+                      const item = checklistItems.find((i) => i.id === id);
                       return { 
                         label: item?.label || 'Unknown Item', 
                         status: ans.status, 
@@ -245,11 +298,22 @@ export default function ChecklistScreen() {
                       };
                     });
 
-                  navigation.navigate('WorkOrderDetails', { 
-                    id, 
-                    stepCompleted: 'checklist', 
+                  navigateAfterStep(navigation, route.params, {
+                    stepCompleted: 'checklist',
                     checklistResult: bottomWarningType === 'fail' ? 'fail' : 'pass',
-                    failedItems
+                    failedItems,
+                    checklistAnswers: checklistItems.map((item) => {
+                      const ans = answers[item.id] || { status: null, note: '', value: '' };
+                      return {
+                        itemId: item.id,
+                        label: item.label,
+                        category: item.category,
+                        type: item.type,
+                        status: ans.status,
+                        note: ans.note,
+                        value: ans.value,
+                      };
+                    }),
                   });
                 }
               }}

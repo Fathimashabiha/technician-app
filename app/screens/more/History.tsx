@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useCallback, useState, useMemo } from 'react';
 import { 
   View, 
   Text, 
@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute } from '@react-navigation/native';
+import { useFocusEffect } from '@react-navigation/native';
 import { 
   Clock, 
   Calendar, 
@@ -33,13 +34,47 @@ import { PageHeader } from '@/components/PageHeader';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { workOrders, timesheetEntries, TimesheetEntry, WorkOrder } from '@/data/mockData';
+import type { WorkOrder } from '@/lib/types/workOrder';
+import { useWorkOrders } from '@/lib/hooks/useWorkOrders';
+import {
+  listCompletedPpmSchedules,
+  ppmStatusForBadge,
+  type PpmSchedule,
+} from '@/lib/ppmService';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { FadeInUp, FadeInDown, Layout } from 'react-native-reanimated';
+import {
+  getTimesheetSummary,
+  listTimesheets,
+  submitTimesheet,
+  syncTimesheetsFromWorkOrders,
+  isTimesheetHoldEvent,
+  isTimesheetResumeEvent,
+  type TimesheetEntry,
+  type TimesheetSummary,
+} from '@/lib/timesheetService';
 
 const { width } = Dimensions.get('window');
 
 type TabType = 'history' | 'timesheet';
+
+type HistoryItem =
+  | { kind: 'workorder'; id: string; sortDate: string; workOrder: WorkOrder }
+  | { kind: 'ppm'; id: string; sortDate: string; schedule: PpmSchedule };
+
+function historySortKey(value: string | undefined): string {
+  if (!value?.trim()) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value.slice(0, 10);
+  return parsed.toISOString();
+}
+
+function ppmHistoryStatus(status: string): string {
+  const upper = String(status ?? '').toUpperCase();
+  if (upper === 'COMPLETED') return 'Completed';
+  if (upper === 'PENDING_REVIEW') return 'Pending Review';
+  return ppmStatusForBadge(status);
+}
 
 export default function HistoryScreen() {
   const route = useRoute<any>();
@@ -52,8 +87,12 @@ export default function HistoryScreen() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [filterType, setFilterType] = useState('All');
+  const [timesheetEntries, setTimesheetEntries] = useState<TimesheetEntry[]>([]);
+  const [timesheetSummary, setTimesheetSummary] = useState<TimesheetSummary | null>(null);
+  const [completedPpmSchedules, setCompletedPpmSchedules] = useState<PpmSchedule[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
-  const filterOptions = ['All', 'PPM', 'Breakdown', 'Corrective', 'Inspection'];
+  const filterOptions = ['All', 'PPM', 'Breakdown', 'Reactive', 'Inspection'];
 
   // Sync tab with route params
   React.useEffect(() => {
@@ -62,23 +101,87 @@ export default function HistoryScreen() {
     }
   }, [route.params?.tab]);
 
-  // Filter completed/verified work orders for history tab
-  const historyWorkOrders = useMemo(() => {
-    return workOrders.filter(wo => {
-      const isFinal = wo.status === 'Completed' || wo.status === 'Verified' || wo.status === 'Closed';
-      const matchesType = filterType === 'All' || wo.type === filterType;
-      return isFinal && matchesType;
-    });
-  }, [filterType]);
+  const { workOrders, loading: woLoading, reload: reloadWorkOrders } = useWorkOrders();
 
-  const handleTSSubmit = () => {
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      await reloadWorkOrders();
+      const ppmRows = await listCompletedPpmSchedules().catch(() => [] as PpmSchedule[]);
+      setCompletedPpmSchedules(ppmRows);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [reloadWorkOrders]);
+
+  const historyItems = useMemo(() => {
+    const items: HistoryItem[] = [];
+
+    if (filterType === 'All' || filterType === 'PPM') {
+      for (const schedule of completedPpmSchedules) {
+        items.push({
+          kind: 'ppm',
+          id: `ppm-${schedule.id}`,
+          sortDate: historySortKey(schedule.completedAt ?? schedule.dueDate),
+          schedule,
+        });
+      }
+    }
+
+    if (filterType !== 'PPM') {
+      for (const wo of workOrders) {
+        const isFinal =
+          wo.status === 'Completed' || wo.status === 'Verified' || wo.status === 'Closed';
+        const matchesType = filterType === 'All' || wo.type === filterType;
+        if (isFinal && matchesType) {
+          items.push({
+            kind: 'workorder',
+            id: `wo-${wo.id}`,
+            sortDate: historySortKey(wo.completionDate ?? wo.dueDate),
+            workOrder: wo,
+          });
+        }
+      }
+    }
+
+    return items.sort((a, b) => b.sortDate.localeCompare(a.sortDate));
+  }, [workOrders, completedPpmSchedules, filterType]);
+
+  const loadTimesheets = useCallback(async () => {
+    try {
+      try {
+        await syncTimesheetsFromWorkOrders();
+      } catch {
+        // sync is best-effort; still load summary
+      }
+      const [summaryData, entriesData] = await Promise.all([
+        getTimesheetSummary(),
+        listTimesheets(),
+      ]);
+      setTimesheetSummary(summaryData);
+      setTimesheetEntries(entriesData);
+    } catch {
+      // keep empty values if backend unavailable
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadTimesheets();
+      void loadHistory();
+    }, [loadTimesheets, loadHistory])
+  );
+
+  const handleTSSubmit = async () => {
     if (!selectedTS) return;
     setIsSubmitting(true);
-    setTimeout(() => {
+    try {
+      await submitTimesheet(selectedTS.id);
+      await loadTimesheets();
+    } finally {
       setIsSubmitting(false);
       setSelectedTS(null);
-      // In a real app, we'd update the local state too
-    }, 1500);
+    }
   };
 
   const styles = getStyles(colors, isDark, shadows);
@@ -101,16 +204,22 @@ export default function HistoryScreen() {
         </TouchableOpacity>
       </View>
 
-      {historyWorkOrders.length === 0 ? (
+      {historyLoading && woLoading ? (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyDesc}>Loading history...</Text>
+        </View>
+      ) : historyItems.length === 0 ? (
         <View style={styles.emptyState}>
           <View style={styles.emptyIconCircle}>
             <ClipboardList size={32} color={colors.mutedForeground} />
           </View>
           <Text style={styles.emptyTitle}>No History Found</Text>
           <Text style={styles.emptyDesc}>
-            {filterType === 'All' 
-              ? 'Completed work orders will appear here.' 
-              : `No completed ${filterType} work orders found.`}
+            {filterType === 'All'
+              ? 'Completed work orders and PPM schedules will appear here.'
+              : filterType === 'PPM'
+                ? 'No completed PPM schedules found.'
+                : `No completed ${filterType} work orders found.`}
           </Text>
           {filterType !== 'All' && (
             <Button 
@@ -123,47 +232,79 @@ export default function HistoryScreen() {
         </View>
       ) : (
         <View style={styles.list}>
-          {historyWorkOrders.map((wo, i) => (
+          {historyItems.map((item, i) => {
+            const isPpm = item.kind === 'ppm';
+            const wo = item.kind === 'workorder' ? item.workOrder : null;
+            const schedule = item.kind === 'ppm' ? item.schedule : null;
+            const displayId = isPpm ? (schedule!.ppmCode ?? schedule!.id.slice(0, 8)) : wo!.id;
+            const displayTitle = isPpm ? schedule!.title : wo!.title;
+            const displayDate = isPpm
+              ? (schedule!.completedAt ?? schedule!.dueDate)
+              : (wo!.completionDate ?? wo!.dueDate);
+            const displayStatus = isPpm ? ppmHistoryStatus(schedule!.status) : wo!.status;
+            const displayMeta = isPpm
+              ? (schedule!.assetId ? `Asset ${schedule!.assetId}` : 'PPM schedule')
+              : `${wo!.assetName} • ${wo!.location}`;
+
+            return (
             <Animated.View 
-              key={wo.id} 
+              key={item.id} 
               entering={FadeInUp.delay(i * 50)}
               layout={Layout.springify()}
             >
               <TouchableOpacity
-                onPress={() => navigation.navigate('WorkOrderDetails', { id: wo.id })}
+                onPress={() =>
+                  isPpm
+                    ? navigation.navigate('PpmExecutionDetails', { scheduleId: schedule!.id })
+                    : navigation.navigate('WorkOrderDetails', { id: wo!.id })
+                }
                 activeOpacity={0.7}
               >
                 <Card style={styles.woCard}>
                    <View style={styles.woHeader}>
                     <View style={styles.woInfo}>
-                      <Text style={styles.woId}>{wo.id}</Text>
-                      <Text style={styles.woTitle}>{wo.title}</Text>
+                      <Text style={styles.woId}>{displayId}</Text>
+                      <Text style={styles.woTitle}>{displayTitle}</Text>
                     </View>
-                    <StatusBadge status={wo.status} />
+                    <StatusBadge status={displayStatus} />
                   </View>
                   
                   <View style={styles.woMeta}>
                     <View style={styles.metaItem}>
                       <Calendar size={12} color={colors.mutedForeground} />
-                      <Text style={styles.metaText}>{wo.dueDate}</Text>
+                      <Text style={styles.metaText}>{displayDate}</Text>
                     </View>
-                    <View style={styles.metaDivider} />
-                    <View style={styles.metaItem}>
-                      <Clock size={12} color={colors.mutedForeground} />
-                      <Text style={styles.metaText}>{wo.estimatedTime}</Text>
-                    </View>
+                    {!isPpm && (
+                      <>
+                        <View style={styles.metaDivider} />
+                        <View style={styles.metaItem}>
+                          <Clock size={12} color={colors.mutedForeground} />
+                          <Text style={styles.metaText}>{wo!.estimatedTime}</Text>
+                        </View>
+                      </>
+                    )}
+                    {isPpm && (
+                      <>
+                        <View style={styles.metaDivider} />
+                        <View style={styles.metaItem}>
+                          <ShieldCheck size={12} color={colors.primary} />
+                          <Text style={[styles.metaText, { color: colors.primary }]}>PPM</Text>
+                        </View>
+                      </>
+                    )}
                   </View>
 
                   <View style={styles.woFooter}>
                     <Text style={styles.woAsset} numberOfLines={1}>
-                      {wo.assetName} • {wo.location}
+                      {displayMeta}
                     </Text>
                     <ChevronRight size={16} color={colors.mutedForeground} />
                   </View>
                 </Card>
               </TouchableOpacity>
             </Animated.View>
-          ))}
+            );
+          })}
         </View>
       )}
     </ScrollView>
@@ -183,16 +324,16 @@ export default function HistoryScreen() {
         <Text style={styles.summaryLabel}>Weekly Overview</Text>
         <View style={styles.summaryMain}>
           <View>
-            <Text style={styles.summaryHours}>24.0h</Text>
-            <Text style={styles.summaryTarget}>of 40h target</Text>
+            <Text style={styles.summaryHours}>{timesheetSummary?.totalHoursLabel ?? '0.0h'}</Text>
+            <Text style={styles.summaryTarget}>of {timesheetSummary?.targetHoursLabel ?? '40h'} target</Text>
           </View>
           <View style={styles.summaryRight}>
-            <Text style={styles.summaryShifts}>3 shifts</Text>
-            <Text style={styles.summaryJobs}>6 jobs completed</Text>
+            <Text style={styles.summaryShifts}>{timesheetSummary?.shiftCount ?? 0} shifts</Text>
+            <Text style={styles.summaryJobs}>{timesheetSummary?.jobsCompleted ?? 0} jobs completed</Text>
           </View>
         </View>
         <View style={styles.progressContainer}>
-          <View style={[styles.progressBar, { width: '60%' }]} />
+          <View style={[styles.progressBar, { width: `${Math.min(timesheetSummary?.progressPercent ?? 0, 100)}%` }]} />
         </View>
       </LinearGradient>
 
@@ -365,9 +506,9 @@ export default function HistoryScreen() {
 
                   <Text style={styles.breakdownHeader}>COMPLETED TASKS</Text>
                   {selectedTS.jobs.map((job) => {
-                    const holdCount = job.timeline.filter(e => e.event === 'On Hold').length;
+                    const holdCount = job.timeline.filter((e) => isTimesheetHoldEvent(e.event)).length;
                     const holdReasons = job.timeline
-                       .filter(e => e.event === 'On Hold' && e.note)
+                       .filter((e) => isTimesheetHoldEvent(e.event) && e.note)
                        .map(e => e.note);
 
                     return (
@@ -429,7 +570,7 @@ export default function HistoryScreen() {
                           {job.timeline.map((ev, idx) => (
                             <View key={idx} style={styles.timelineItem}>
                               <View style={styles.timelineLeft}>
-                                <View style={[styles.timelineDot, ev.event === 'Completed' && { backgroundColor: colors.success }, ev.event === 'On Hold' && { backgroundColor: '#F5A623' }]} />
+                                <View style={[styles.timelineDot, ev.event === 'Completed' && { backgroundColor: colors.success }, isTimesheetHoldEvent(ev.event) && { backgroundColor: '#F5A623' }, isTimesheetResumeEvent(ev.event) && { backgroundColor: colors.primary }]} />
                                 {idx < job.timeline.length - 1 && <View style={styles.timelineLine} />}
                               </View>
                               <View style={styles.timelineRight}>

@@ -16,6 +16,9 @@ export const StatusBadge = ({ status, size = 'sm', style }: BadgeProps) => {
     'Assigned':       { bg: colors.info + '1A', text: colors.info },
     'Accepted':       { bg: colors.success + '1A', text: colors.success },
     'In Progress':    { bg: colors.warning + '1A', text: colors.warning },
+    'On Hold':        { bg: colors.mutedForeground + '1A', text: colors.mutedForeground },
+    'Pending Approval': { bg: colors.warning + '1A', text: colors.warning },
+    'Cancelled':      { bg: colors.mutedForeground + '1A', text: colors.mutedForeground },
     'Completed':      { bg: colors.success + '1A', text: colors.success },
     'Verified':       { bg: colors.success + '1A', text: colors.success },
     'Closed':         { bg: colors.mutedForeground + '1A', text: colors.mutedForeground },
@@ -44,10 +47,12 @@ export const StatusBadge = ({ status, size = 'sm', style }: BadgeProps) => {
     'PPM':            { bg: colors.info + '1A', text: colors.info },
     'Breakdown':      { bg: colors.destructive + '1A', text: colors.destructive },
     'Inspection':     { bg: colors.secondary + '1A', text: colors.secondary },
-    'Corrective':     { bg: colors.warning + '1A', text: colors.warning },
+    'Reactive':       { bg: colors.warning + '1A', text: colors.warning },
+    'Corrective':     { bg: colors.warning + '1A', text: colors.warning }, // legacy alias → Reactive
+    'Other':          { bg: colors.mutedForeground + '1A', text: colors.mutedForeground },
   };
 
-  const config = statusColors[status] || { bg: colors.success + '1A', text: colors.success };
+  const config = statusColors[status] || { bg: colors.mutedForeground + '1A', text: colors.mutedForeground };
   
   return (
     <View style={[

@@ -18,7 +18,13 @@ import {
   Play, Video, BookOpen, Package, ArrowLeft, X, Check, X as XIcon, Timer, 
   ShieldCheck, Clock, Zap, ChevronDown, Camera, CheckCircle2 as CheckCircleIcon
 } from 'lucide-react-native';
-import { assets, workOrders, checklistItems, manuals, inventoryItems } from '@/data/mockData';
+import { lookupAssetByScan } from '@/lib/assetService';
+import type { WorkOrder } from '@/lib/types/workOrder';
+import { fetchAssetChecklist, fetchAssetManuals } from '@/lib/assetDocumentsService';
+import type { AssetChecklistItem, AssetManual } from '@/lib/types/assetDocuments';
+import { fetchVanStock } from '@/lib/inventoryService';
+import { useWorkOrders } from '@/lib/hooks/useWorkOrders';
+import type { Asset } from '@/lib/types/asset';
 import { StatusBadge } from '@/components/StatusBadge';
 import { PageHeader } from '@/components/PageHeader';
 import { Button } from '@/components/ui/Button';
@@ -52,10 +58,39 @@ export default function QRScanScreen() {
   const [hasPhoto, setHasPhoto] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  const asset = assets[0];
-  const assetWOs = workOrders.filter(w => w.assetId === asset.id);
-  const assetManuals = manuals.filter(m => m.assetId === asset.id);
-  const assetParts = inventoryItems.slice(0, 4);
+  const { workOrders } = useWorkOrders();
+  const [scannedAssetId, setScannedAssetId] = useState<string | null>(null);
+  const [scannedAsset, setScannedAsset] = useState<Asset | null>(null);
+  const [assetParts, setAssetParts] = useState<
+    Array<{ id: string; name: string; partNumber: string; quantity: number }>
+  >([]);
+  const [assetManuals, setAssetManuals] = useState<AssetManual[]>([]);
+  const [assetChecklist, setAssetChecklist] = useState<AssetChecklistItem[]>([]);
+
+  const asset =
+    scannedAsset ??
+    (scannedAssetId
+      ? {
+          id: scannedAssetId,
+          name: scannedAssetId,
+          location: '—',
+          type: 'Equipment',
+          lastService: '—',
+          nextService: '—',
+          status: 'Active' as const,
+          openWOs: 0,
+          serialNumber: scannedAssetId,
+          manufacturer: '—',
+          installationDate: '—',
+          warrantyExpiry: '—',
+          criticality: 'Major' as const,
+          slaTier: 'Standard',
+          slaPolicy: { response: '—', resolution: '—' },
+        }
+      : null);
+  const assetWOs = asset
+    ? workOrders.filter((w) => w.assetId === asset.id)
+    : [];
 
   const scanHistory = [
     { id: 'AST-001', name: 'AHU-03', time: '10 min ago' },
@@ -63,27 +98,50 @@ export default function QRScanScreen() {
     { id: 'AST-008', name: 'Elevator E-02', time: 'Yesterday' },
   ];
 
-  const handleScanSuccess = useCallback((data: string) => {
+  const handleScanSuccess = useCallback(async (data: string) => {
     setQrResolving(true);
     setQrError(null);
-    const found = assets.find(
-      (a) =>
-        a.id.toLowerCase() === data.toLowerCase() ||
-        data.toLowerCase().includes(a.id.toLowerCase()),
-    );
-    setTimeout(() => {
-      setQrResolving(false);
-      if (found || data.trim()) {
-        setScanned(true);
-        setViewMode('result');
-      } else {
-        setQrError('Asset not found. Try manual entry or scan another code.');
+    try {
+      const loaded = await lookupAssetByScan(data);
+      if (!loaded?.id) {
+        setQrError('Asset not found. Check the code or try manual entry.');
+        return;
       }
-    }, 600);
+      setScannedAssetId(loaded.id);
+      setScannedAsset(loaded);
+      const [manuals, checklist] = await Promise.all([
+        fetchAssetManuals(loaded.id).catch(() => [] as AssetManual[]),
+        fetchAssetChecklist(loaded.id).catch(() => [] as AssetChecklistItem[]),
+      ]);
+      setAssetManuals(manuals);
+      setAssetChecklist(checklist);
+      setScanned(true);
+      setViewMode('result');
+      try {
+        const stock = await fetchVanStock();
+        setAssetParts(
+          stock
+            .filter((p) => p.location === 'Van Stock')
+            .slice(0, 4)
+            .map((p) => ({
+              id: p.id,
+              name: p.name,
+              partNumber: p.partNumber,
+              quantity: p.quantity,
+            }))
+        );
+      } catch {
+        setAssetParts([]);
+      }
+    } catch (err: unknown) {
+      setQrError(err instanceof Error ? err.message : 'Could not look up asset.');
+    } finally {
+      setQrResolving(false);
+    }
   }, []);
 
   const handleScan = () => {
-    handleScanSuccess(asset.id);
+    setQrError('Use the camera or enter an asset code below.');
   };
 
   const handleBarcodeSubmit = () => {
@@ -114,7 +172,9 @@ export default function QRScanScreen() {
 
   const headerProps = getHeaderProps();
 
-  const renderManuals = () => (
+  const renderManuals = () => {
+    if (!asset) return null;
+    return (
     <Animated.View entering={FadeInRight} style={styles.subview}>
       <Text style={styles.subviewSubtitle}>{asset.name} — {assetManuals.length} documents</Text>
       <View style={styles.manualsList}>
@@ -134,11 +194,19 @@ export default function QRScanScreen() {
         ))}
       </View>
     </Animated.View>
-  );
+    );
+  };
 
   const renderWorkOrders = () => {
-    const activeWOs = assetWOs.filter(wo => wo.status !== 'Completed' && wo.status !== 'Closed' && wo.status !== 'Verified');
-    const historicalWOs = assetWOs.filter(wo => wo.status === 'Completed' || wo.status === 'Closed' || wo.status === 'Verified');
+    if (!asset) return null;
+    const activeWOs = assetWOs.filter(
+      (wo: WorkOrder) =>
+        wo.status !== 'Completed' && wo.status !== 'Closed' && wo.status !== 'Verified'
+    );
+    const historicalWOs = assetWOs.filter(
+      (wo: WorkOrder) =>
+        wo.status === 'Completed' || wo.status === 'Closed' || wo.status === 'Verified'
+    );
 
     return (
       <Animated.View entering={FadeInRight} style={styles.subview}>
@@ -214,19 +282,28 @@ export default function QRScanScreen() {
     );
   };
 
-  const renderChecklist = () => (
+  const renderChecklist = () => {
+    if (!asset) return null;
+    return (
     <Animated.View entering={FadeInRight} style={styles.subview}>
       <View style={styles.subviewHeaderRow}>
         <View>
           <Text style={styles.subviewSubtitle}>{asset.name} — Quick Inspection</Text>
         </View>
         <View style={styles.progressCircle}>
-          <Text style={styles.progressText}>{Math.round((Object.keys(checklistAnswers).length / checklistItems.length) * 100)}%</Text>
+          <Text style={styles.progressText}>
+            {assetChecklist.length === 0
+              ? '0%'
+              : `${Math.round((Object.keys(checklistAnswers).length / assetChecklist.length) * 100)}%`}
+          </Text>
         </View>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 400 }}>
-        {checklistItems.slice(0, 8).map((item, i) => {
+        {assetChecklist.length === 0 ? (
+          <Text style={styles.subviewSubtitle}>No checklist tasks on this asset.</Text>
+        ) : null}
+        {assetChecklist.slice(0, 8).map((item, i) => {
           const ans = checklistAnswers[item.id];
           return (
             <Card key={item.id} style={styles.checkCard}>
@@ -267,8 +344,11 @@ export default function QRScanScreen() {
       />
     </Animated.View>
   );
+  };
 
-  const renderCreateIssue = () => (
+  const renderCreateIssue = () => {
+    if (!asset) return null;
+    return (
     <Animated.View entering={FadeInRight} style={styles.subview}>
       <Text style={styles.subviewSubtitle}>Report a new finding for {asset.name}</Text>
       
@@ -361,8 +441,18 @@ export default function QRScanScreen() {
       </Card>
     </Animated.View>
   );
+  };
 
-  const renderResult = () => (
+  const renderResult = () => {
+    if (!asset) {
+      return (
+        <View style={styles.subview}>
+          <Text style={styles.subviewSubtitle}>Scan or enter an asset code to continue.</Text>
+        </View>
+      );
+    }
+
+    return (
     <Animated.View entering={FadeInUp} style={styles.subview}>
       {/* Asset Info Card */}
       <Card variant="elevated" style={styles.assetCard}>
@@ -506,6 +596,7 @@ export default function QRScanScreen() {
       <Button onPress={() => { setScanned(false); setViewMode('scanner'); }} title="Scan Another" variant="ghost" />
     </Animated.View>
   );
+  };
 
   const renderScanner = () => (
     <Animated.View entering={FadeIn} style={styles.scannerView}>

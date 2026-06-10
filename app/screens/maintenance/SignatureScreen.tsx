@@ -1,26 +1,31 @@
 import React, { useState, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, TextInput, Dimensions, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
-import { ArrowLeft, Eraser, PenLine, Pause, User, ShieldCheck, FileText } from 'lucide-react-native';
-import { COLORS, SHADOWS, useTheme } from '@/app/constants/theme';
+import { useNavigation, useRoute } from '@react-navigation/native';
+import { ArrowLeft, Eraser, Pause, User, ShieldCheck, FileText } from 'lucide-react-native';
+import { SHADOWS, useTheme } from '@/app/constants/theme';
 import { Button } from '@/components/ui/Button';
 import { SignaturePad, type SignaturePadRef } from '@/components/ui/SignaturePad';
-import { saveWorkOrderSignatures } from '@/lib/signatureStorage';
+import { buildWorkOrderSignatureStepPayload, saveWorkOrderSignatures } from '@/lib/signatureStorage';
+import { getReturnScreen, navigateAfterStep } from '@/lib/executionNavigation';
 
 export default function SignatureScreen() {
-  const { colors, gradients, shadows, isDark } = useTheme();
+  const { colors } = useTheme();
   const styles = getStyles(colors);
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
-  const { id } = route.params;
+  const { id, scheduleId } = route.params;
+
+  const isPpmFlow = getReturnScreen(route.params) === 'PpmExecutionDetails';
+  const contextLabel = isPpmFlow ? 'PPM' : 'Work Order';
+  const contextId = isPpmFlow ? (scheduleId ?? id) : id;
 
   const [techSigned, setTechSigned] = useState(false);
   const [custSigned, setCustSigned] = useState(false);
   const [customerName, setCustomerName] = useState('');
   const [techNote, setTechNote] = useState('');
-  
-  // Use keys to force-clear pads
+  const [techPaths, setTechPaths] = useState<string[]>([]);
+  const [custPaths, setCustPaths] = useState<string[]>([]);
   const [techKey, setTechKey] = useState(0);
   const [custKey, setCustKey] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -32,16 +37,29 @@ export default function SignatureScreen() {
 
   const canSubmit = techSigned && custSigned;
 
+  const handleHold = () => {
+    if (isPpmFlow) {
+      navigation.navigate('PpmExecutionDetails', {
+        scheduleId: scheduleId ?? id,
+        holdWork: true,
+      });
+      return;
+    }
+    navigation.navigate('WorkOrderDetails', { id, holdWork: true });
+  };
+
   const handleClearTech = () => {
     techPadRef.current?.clear();
-    setTechKey(k => k + 1);
+    setTechKey((k) => k + 1);
     setTechSigned(false);
+    setTechPaths([]);
   };
 
   const handleClearCust = () => {
     custPadRef.current?.clear();
-    setCustKey(k => k + 1);
+    setCustKey((k) => k + 1);
     setCustSigned(false);
+    setCustPaths([]);
   };
 
   const handleSubmit = async () => {
@@ -49,19 +67,34 @@ export default function SignatureScreen() {
 
     setSaving(true);
     try {
-      const techPaths = techPadRef.current?.getPaths() ?? [];
-      const custPaths = custPadRef.current?.getPaths() ?? [];
+      const currentTechPaths = techPadRef.current?.getPaths() ?? techPaths;
+      const currentCustPaths = custPadRef.current?.getPaths() ?? custPaths;
 
-      if (techPaths.length === 0 || custPaths.length === 0) {
+      if (currentTechPaths.length === 0 || currentCustPaths.length === 0) {
         Alert.alert('Signatures Required', 'Please sign in both fields before submitting.');
         return;
       }
 
-      await saveWorkOrderSignatures(id, techPaths, custPaths, padWidth, padHeight);
-      navigation.navigate('WorkOrderDetails', { id, stepCompleted: 'signature' });
+      const signatureData = buildWorkOrderSignatureStepPayload({
+        techPaths: currentTechPaths,
+        custPaths: currentCustPaths,
+        width: padWidth,
+        height: padHeight,
+        customerName: customerName.trim(),
+        technicianNotes: techNote.trim(),
+      });
+
+      await saveWorkOrderSignatures(id, currentTechPaths, currentCustPaths, padWidth, padHeight);
+
+      navigateAfterStep(navigation, route.params, {
+        stepCompleted: 'signature',
+        signatureData,
+      });
     } catch (err) {
       console.error('Signature save error:', err);
-      Alert.alert('Save Failed', 'Could not save signatures. Please try again.');
+      const message =
+        err instanceof Error ? err.message : 'Could not save signatures. Please try again.';
+      Alert.alert('Save Failed', message);
     } finally {
       setSaving(false);
     }
@@ -75,57 +108,54 @@ export default function SignatureScreen() {
         </TouchableOpacity>
         <View style={styles.headerTitleWrap}>
           <Text style={styles.title}>Digital Sign-off</Text>
-          <Text style={styles.subtitle}>Work Order: {id}</Text>
+          <Text style={styles.subtitle}>{contextLabel}: {contextId}</Text>
         </View>
-        <TouchableOpacity 
-          onPress={() => navigation.navigate('WorkOrderDetails', { id, holdWork: true } as any)} 
-          style={styles.holdButton}
-        >
+        <TouchableOpacity onPress={handleHold} style={styles.holdButton}>
           <Pause size={20} color={colors.foreground} />
         </TouchableOpacity>
       </View>
 
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         <Text style={styles.instructions}>
-          Please provide a brief note and both technician and customer signatures to finalize the work order completion.
+          Please provide a brief note and both technician and customer signatures to finalize completion.
         </Text>
 
-        {/* Technician Note Section */}
         <View style={styles.sectionHeader}>
-           <FileText size={16} color={colors.primary} />
-           <Text style={styles.sectionTitle}>Technician Notes</Text>
+          <FileText size={16} color={colors.primary} />
+          <Text style={styles.sectionTitle}>Technician Notes</Text>
         </View>
         <View style={styles.noteInputContainer}>
-           <TextInput 
-              style={styles.noteInput}
-              placeholder="Enter any final remarks or observations..."
-              placeholderTextColor={colors.mutedForeground}
-              value={techNote}
-              onChangeText={setTechNote}
-              multiline
-              numberOfLines={4}
-              textAlignVertical="top"
-           />
+          <TextInput
+            style={styles.noteInput}
+            placeholder="Enter any final remarks or observations..."
+            placeholderTextColor={colors.mutedForeground}
+            value={techNote}
+            onChangeText={setTechNote}
+            multiline
+            numberOfLines={4}
+            textAlignVertical="top"
+          />
         </View>
 
         <View style={styles.divider} />
 
-        {/* Technician Signature Section */}
         <View style={styles.sectionHeader}>
-           <ShieldCheck size={16} color={colors.primary} />
-           <Text style={styles.sectionTitle}>Technician Signature</Text>
+          <ShieldCheck size={16} color={colors.primary} />
+          <Text style={styles.sectionTitle}>Technician Signature</Text>
         </View>
         <View style={styles.canvasWrapper}>
           <View style={[styles.canvas, techSigned && styles.canvasSigned]}>
-            <SignaturePad 
+            <SignaturePad
               ref={techPadRef}
               key={`tech-${techKey}`}
               onSignatureChange={setTechSigned}
+              onPathsChange={setTechPaths}
               height={padHeight}
               width={padWidth}
+              clearKey={techKey}
             />
           </View>
-          
+
           {techSigned && (
             <View style={styles.toolbar}>
               <TouchableOpacity onPress={handleClearTech} style={styles.clearBtn}>
@@ -138,34 +168,35 @@ export default function SignatureScreen() {
 
         <View style={styles.divider} />
 
-        {/* Customer Signature Section */}
         <View style={styles.sectionHeader}>
-           <User size={16} color={colors.primary} />
-           <Text style={styles.sectionTitle}>Customer Signature</Text>
+          <User size={16} color={colors.primary} />
+          <Text style={styles.sectionTitle}>Customer Signature</Text>
         </View>
 
         <View style={styles.nameInputContainer}>
-           <Text style={styles.inputLabel}>Customer Name</Text>
-           <TextInput 
-              style={styles.nameInput}
-              placeholder="Enter customer name..."
-              placeholderTextColor={colors.mutedForeground}
-              value={customerName}
-              onChangeText={setCustomerName}
-           />
+          <Text style={styles.inputLabel}>Customer Name</Text>
+          <TextInput
+            style={styles.nameInput}
+            placeholder="Enter customer name..."
+            placeholderTextColor={colors.mutedForeground}
+            value={customerName}
+            onChangeText={setCustomerName}
+          />
         </View>
 
         <View style={styles.canvasWrapper}>
           <View style={[styles.canvas, custSigned && styles.canvasSigned]}>
-            <SignaturePad 
+            <SignaturePad
               ref={custPadRef}
               key={`cust-${custKey}`}
               onSignatureChange={setCustSigned}
+              onPathsChange={setCustPaths}
               height={padHeight}
               width={padWidth}
+              clearKey={custKey}
             />
           </View>
-          
+
           {custSigned && (
             <View style={styles.toolbar}>
               <TouchableOpacity onPress={handleClearCust} style={styles.clearBtn}>
@@ -177,8 +208,8 @@ export default function SignatureScreen() {
         </View>
 
         <View style={styles.scrollableFooter}>
-          <Button 
-            title={saving ? 'Saving...' : 'Sign & Complete'} 
+          <Button
+            title={saving ? 'Saving...' : 'Sign & Complete'}
             disabled={!canSubmit || saving}
             onPress={handleSubmit}
             style={styles.submitBtn}
@@ -254,7 +285,7 @@ const getStyles = (colors: any) => StyleSheet.create({
   },
   canvas: {
     height: 160,
-    backgroundColor: colors.panel,
+    backgroundColor: '#FFFFFF',
     borderRadius: 16,
     borderWidth: 2,
     borderColor: colors.muted + '30',
@@ -265,29 +296,7 @@ const getStyles = (colors: any) => StyleSheet.create({
   canvasSigned: {
     borderStyle: 'solid',
     borderColor: colors.primary + '30',
-    backgroundColor: colors.primary + '08',
-  },
-  placeholderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  placeholder: {
-    fontSize: 14,
-    color: colors.mutedForeground,
-    fontWeight: '500',
-  },
-  mockSignature: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cursive: {
-    fontSize: 28,
-    color: colors.foreground,
-    transform: [{ rotate: '-4deg' }],
-    marginTop: -15,
-    fontWeight: '300',
-    fontStyle: 'italic',
+    backgroundColor: '#FFFFFF',
   },
   toolbar: {
     flexDirection: 'row',
@@ -357,4 +366,3 @@ const getStyles = (colors: any) => StyleSheet.create({
     borderRadius: 16,
   },
 });
-

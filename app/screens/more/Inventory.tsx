@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,87 +11,287 @@ import {
   KeyboardAvoidingView,
   Alert,
   StatusBar,
+  ActivityIndicator,
 } from 'react-native';
-import { Search, AlertTriangle, X } from 'lucide-react-native';
-import { inventoryItems as initialItems } from '@/data/mockData';
+import { useFocusEffect } from '@react-navigation/native';
+import {
+  Search,
+  AlertTriangle,
+  X,
+  RotateCcw,
+  Package,
+  ClipboardList,
+} from 'lucide-react-native';
 import { PageHeader } from '@/components/PageHeader';
-import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { useTheme } from '@/app/constants/theme';
 import Animated, { FadeInUp, Layout } from 'react-native-reanimated';
-import type { InventoryItem } from '@/data/mockData';
+import ReturnPartsModal from '@/components/inventory/ReturnPartsModal';
+import PartSelectField from '@/components/inventory/PartSelectField';
+import { ApiError } from '@/lib/api';
+import {
+  fetchVanStock,
+  fetchInventoryCatalog,
+  fetchPartReturns,
+  fetchPartRequests,
+  submitPartRequest,
+  submitPartReturn,
+  type InventoryCatalogItem,
+  type InventoryItem,
+  type PartReturnRecord,
+  type PartRequestRecord,
+} from '@/lib/inventoryService';
 
 type StockFilter = 'All' | 'In Stock' | 'Low Stock' | 'Out of Stock';
+type InventoryView = 'stock' | 'requests' | 'returns';
+
+function normalizeRequestStatus(status: string): string {
+  const value = status.trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (value === 'approved' || value === 'fullyissued') return 'Fully Issued';
+  if (value === 'partiallyissued') return 'Partially Issued';
+  if (value === 'rejected') return 'Rejected';
+  if (value === 'submitted' || value === 'submittedtoinventory') return 'SubmittedToInventory';
+  if (value === 'pending') return 'Pending';
+  return status.trim();
+}
+
+function formatRequestStatus(req: PartRequestRecord): string {
+  switch (normalizeRequestStatus(req.status)) {
+    case 'Fully Issued':
+    case 'Approved':
+      return 'Approved';
+    case 'Partially Issued':
+      return 'Partially issued';
+    case 'Rejected':
+      return 'Rejected';
+    case 'SubmittedToInventory':
+      return 'Submitted';
+    default:
+      return 'Pending';
+  }
+}
+
+function formatRequestLine(line: PartRequestRecord['lines'][number]): string {
+  const requested = line.requestedQuantity ?? line.quantity;
+  const issued = line.issuedQuantity ?? 0;
+  if (issued > 0 && issued < requested) return `${issued}/${requested}× ${line.name}`;
+  return `${requested}× ${line.name}`;
+}
+
+function formatReturnStatus(status: PartReturnRecord['status']): string {
+  return status;
+}
+
+function formatShortDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function statusColor(
+  colors: { primary: string; warning: string; destructive: string; mutedForeground: string },
+  label: string
+): string {
+  const normalized = label.toLowerCase();
+  if (normalized.includes('partial')) return colors.warning;
+  if (normalized.includes('approv') || normalized.includes('received')) return colors.primary;
+  if (normalized.includes('reject')) return colors.destructive;
+  if (normalized.includes('submit') || normalized.includes('pending')) return colors.warning;
+  return colors.mutedForeground;
+}
 
 export default function InventoryScreen() {
   const { colors, gradients, shadows, isDark } = useTheme();
-  const [items] = useState<InventoryItem[]>(initialItems);
+  const [items, setItems] = useState<InventoryItem[]>([]);
   const [search, setSearch] = useState('');
   const [activeFilter, setActiveFilter] = useState<StockFilter>('All');
   const [showRequestModal, setShowRequestModal] = useState(false);
+  const [showReturnModal, setShowReturnModal] = useState(false);
+  const [partReturns, setPartReturns] = useState<PartReturnRecord[]>([]);
+  const [partRequests, setPartRequests] = useState<PartRequestRecord[]>([]);
+  const [activeView, setActiveView] = useState<InventoryView>('stock');
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Request form state
-  const [reqPartName, setReqPartName] = useState('');
-  const [reqPartNumber, setReqPartNumber] = useState('');
+  const [requestCatalog, setRequestCatalog] = useState<InventoryCatalogItem[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [selectedRequestPart, setSelectedRequestPart] = useState<InventoryCatalogItem | null>(null);
   const [reqQuantity, setReqQuantity] = useState('');
   const [reqUrgency, setReqUrgency] = useState<'Low' | 'Medium' | 'High'>('Medium');
   const [reqNotes, setReqNotes] = useState('');
 
-  const filtered = useMemo(() => {
-    return items.filter((item) => {
-      if (item.location !== 'Van Stock') return false;
-      const matchesSearch = item.name.toLowerCase().includes(search.toLowerCase()) ||
-                          item.partNumber.toLowerCase().includes(search.toLowerCase());
-      if (!matchesSearch) return false;
+  const loadInventory = useCallback(async () => {
+    try {
+      setLoading(true);
+      setLoadError(null);
+      const rows = await fetchVanStock(undefined, {
+        search: search || undefined,
+        stockHealth: activeFilter,
+      });
+      setItems(rows);
+      const [returns, requests] = await Promise.all([
+        fetchPartReturns(),
+        fetchPartRequests(),
+      ]);
+      setPartReturns(returns);
+      setPartRequests(requests);
+    } catch (error) {
+      const message =
+        error instanceof ApiError ? error.message : 'Could not load inventory';
+      setLoadError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, [search, activeFilter]);
 
-      switch (activeFilter) {
-        case 'Out of Stock':
-          return item.quantity === 0;
-        case 'Low Stock':
-          return item.quantity > 0 && item.quantity <= item.minStock;
-        case 'In Stock':
-          return item.quantity > item.minStock;
-        default:
-          return true;
-      }
-    });
-  }, [items, search, activeFilter]);
+  useFocusEffect(
+    useCallback(() => {
+      void loadInventory();
+    }, [loadInventory]),
+  );
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void loadInventory();
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [search, activeFilter, loadInventory]);
+
+  const filtered = useMemo(() => {
+    return items.filter((item) => item.location === 'Van Stock');
+  }, [items]);
+
+  const loadRequestCatalog = useCallback(async () => {
+    try {
+      setCatalogLoading(true);
+      const rows = await fetchInventoryCatalog({ purpose: 'request' });
+      setRequestCatalog(rows);
+    } catch {
+      setRequestCatalog([]);
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showRequestModal) {
+      void loadRequestCatalog();
+    }
+  }, [showRequestModal, loadRequestCatalog]);
 
   const resetForm = () => {
-    setReqPartName('');
-    setReqPartNumber('');
+    setSelectedRequestPart(null);
     setReqQuantity('');
     setReqUrgency('Medium');
     setReqNotes('');
   };
 
-  const handleSubmitRequest = () => {
-    if (!reqPartName.trim()) {
-      Alert.alert('Required', 'Please enter the part name.');
+  const openRequestModal = () => {
+    resetForm();
+    setShowRequestModal(true);
+  };
+
+  const handleSubmitRequest = async () => {
+    if (!selectedRequestPart) {
+      Alert.alert('Required', 'Please select a part from the list.');
       return;
     }
     if (!reqQuantity.trim() || isNaN(Number(reqQuantity))) {
       Alert.alert('Required', 'Please enter a valid quantity.');
       return;
     }
-    Alert.alert('Success', 'Part request submitted successfully!', [
-      {
-        text: 'OK',
-        onPress: () => {
-          resetForm();
-          setShowRequestModal(false);
+
+    try {
+      setSubmitting(true);
+      await submitPartRequest({
+        urgency: reqUrgency,
+        notes: reqNotes.trim() || undefined,
+        lines: [
+          {
+            partRef: selectedRequestPart.id,
+            name: selectedRequestPart.name,
+            partNumber: selectedRequestPart.partNumber,
+            quantity: Number(reqQuantity),
+          },
+        ],
+      });
+      Alert.alert('Success', 'Part request submitted successfully!', [
+        {
+          text: 'OK',
+          onPress: () => {
+            resetForm();
+            setShowRequestModal(false);
+            setActiveView('requests');
+            void loadInventory();
+          },
         },
-      },
-    ]);
+      ]);
+    } catch (error) {
+      const message =
+        error instanceof ApiError ? error.message : 'Failed to submit request';
+      Alert.alert('Error', message);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const openRequestWithItem = (item: InventoryItem) => {
-    setReqPartName(item.name);
-    setReqPartNumber(item.partNumber);
-    setReqQuantity(String(Math.max(0, item.minStock - item.quantity)));
+    const catalogItem: InventoryCatalogItem = {
+      id: item.id,
+      name: item.name,
+      partNumber: item.partNumber,
+      unit: item.unit,
+      availableStock: item.quantity,
+      source: 'van',
+    };
+    setSelectedRequestPart(catalogItem);
+    setReqQuantity(String(Math.max(1, item.minStock - item.quantity)));
     setReqUrgency('High');
-    setReqNotes(`Automated request for low stock item.`);
+    setReqNotes('Automated request for low stock item.');
     setShowRequestModal(true);
+  };
+
+  const handleSubmitReturn = async (payload: {
+    lines: { itemId: string; quantity: number }[];
+    reason: PartReturnRecord['reason'];
+    destination: string;
+    workOrderId?: string;
+    notes?: string;
+  }) => {
+    try {
+      setSubmitting(true);
+      const record = await submitPartReturn({
+        reason: payload.reason,
+        destination: payload.destination,
+        workOrderRef: payload.workOrderId,
+        notes: payload.notes,
+        lines: payload.lines,
+      });
+
+      setPartReturns((prev) => [record, ...prev]);
+      setActiveView('returns');
+      setShowReturnModal(false);
+      await loadInventory();
+
+      const totalQty = record.lines.reduce((s, l) => s + l.quantity, 0);
+      Alert.alert(
+        'Return submitted',
+        `${totalQty} unit(s) queued for return to ${payload.destination}. Van stock updates when the warehouse marks it received.`,
+      );
+    } catch (error) {
+      const message =
+        error instanceof ApiError ? error.message : 'Failed to submit return';
+      Alert.alert('Error', message);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const getStockColor = (qty: number, minStock: number) => {
@@ -114,12 +314,21 @@ export default function InventoryScreen() {
       <PageHeader
         title="Inventory"
         rightElement={
-          <TouchableOpacity
-            style={styles.requestButtonHeader}
-            onPress={() => setShowRequestModal(true)}
-          >
-            <Text style={styles.requestButtonHeaderText}>Request Parts</Text>
-          </TouchableOpacity>
+          <View style={styles.headerActions}>
+            <TouchableOpacity
+              style={[styles.headerActionBtn, styles.returnHeaderBtn]}
+              onPress={() => setShowReturnModal(true)}
+            >
+              <RotateCcw size={14} color={isDark ? '#99f6e4' : '#0d9488'} />
+              <Text style={[styles.headerActionText, styles.returnHeaderText]}>Return</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.headerActionBtn}
+              onPress={openRequestModal}
+            >
+              <Text style={styles.headerActionText}>Request</Text>
+            </TouchableOpacity>
+          </View>
         }
       />
 
@@ -142,31 +351,185 @@ export default function InventoryScreen() {
           </View>
         </View>
 
-        <ScrollView 
-          horizontal 
-          showsHorizontalScrollIndicator={false} 
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.filterScroll}
         >
           <View style={styles.filterRow}>
-            {(['All', 'In Stock', 'Low Stock', 'Out of Stock'] as StockFilter[]).map(f => (
+            {(
+              [
+                { key: 'stock' as const, label: 'Van Stock', icon: Package },
+                { key: 'requests' as const, label: 'Requests', icon: ClipboardList },
+                { key: 'returns' as const, label: 'Returns', icon: RotateCcw },
+              ] as const
+            ).map(({ key, label, icon: Icon }) => (
               <TouchableOpacity
-                key={f}
-                onPress={() => setActiveFilter(f)}
-                style={[styles.filterChip, activeFilter === f && styles.activeFilterChip]}
+                key={key}
+                onPress={() => setActiveView(key)}
+                style={[styles.filterChip, activeView === key && styles.activeFilterChip]}
               >
-                <Text style={[styles.filterText, activeFilter === f && styles.activeFilterText]}>
-                  {f}
+                <Icon
+                  size={14}
+                  color={activeView === key ? colors.primary : colors.mutedForeground}
+                />
+                <Text style={[styles.filterText, activeView === key && styles.activeFilterText]}>
+                  {label}
                 </Text>
               </TouchableOpacity>
             ))}
           </View>
         </ScrollView>
+
+        {activeView === 'stock' ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.filterScroll}
+          >
+            <View style={styles.filterRow}>
+              {(['All', 'In Stock', 'Low Stock', 'Out of Stock'] as StockFilter[]).map((f) => (
+                <TouchableOpacity
+                  key={f}
+                  onPress={() => setActiveFilter(f)}
+                  style={[styles.filterChip, activeFilter === f && styles.activeFilterChip]}
+                >
+                  <Text style={[styles.filterText, activeFilter === f && styles.activeFilterText]}>
+                    {f}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </ScrollView>
+        ) : null}
       </View>
+
+      {loading && !loadError ? (
+        <View style={styles.loadingBox}>
+          <ActivityIndicator size="large" color={colors.primary} />
+        </View>
+      ) : loadError ? (
+        <View style={styles.loadingBox}>
+          <Text style={styles.errorText}>{loadError}</Text>
+          <TouchableOpacity style={styles.reqBtnSmall} onPress={() => void loadInventory()}>
+            <Text style={styles.reqBtnText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
+        {activeView === 'requests' ? (
+          <>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>My requests</Text>
+              <View style={styles.countBadge}>
+                <Text style={styles.countText}>{partRequests.length}</Text>
+              </View>
+            </View>
+            <View style={styles.list}>
+              {partRequests.length > 0 ? (
+                partRequests.map((req, i) => {
+                  const statusLabel = formatRequestStatus(req);
+                  const badgeColor = statusColor(colors, statusLabel);
+                  return (
+                    <Animated.View key={req.id} entering={FadeInUp.delay(i * 30)} layout={Layout.springify()}>
+                      <Card style={styles.historyCard}>
+                        <View style={styles.historyCardTop}>
+                          <Text style={styles.historyCardId}>{req.id.slice(0, 8).toUpperCase()}</Text>
+                          <View style={[styles.statusBadge, { backgroundColor: badgeColor + '18' }]}>
+                            <Text style={[styles.statusBadgeText, { color: badgeColor }]}>{statusLabel}</Text>
+                          </View>
+                        </View>
+                        <Text style={styles.historyCardMeta}>
+                          {req.urgency} urgency · {formatShortDate(req.createdAt)}
+                        </Text>
+                        <Text style={styles.historyCardLines} numberOfLines={3}>
+                          {req.lines.map((l) => formatRequestLine(l)).join(', ')}
+                        </Text>
+                        {req.workOrderRef ? (
+                          <Text style={styles.historyCardWo}>WO: {req.workOrderRef}</Text>
+                        ) : null}
+                        {req.notes ? (
+                          <Text style={styles.historyCardNotes} numberOfLines={2}>
+                            {req.notes}
+                          </Text>
+                        ) : null}
+                        {req.rejectionReason ? (
+                          <Text style={styles.historyCardReject}>{req.rejectionReason}</Text>
+                        ) : null}
+                      </Card>
+                    </Animated.View>
+                  );
+                })
+              ) : loading ? null : (
+                <View style={styles.emptyState}>
+                  <Text style={styles.emptyStateText}>No part requests yet.</Text>
+                  <TouchableOpacity style={styles.reqBtnSmall} onPress={openRequestModal}>
+                    <Text style={styles.reqBtnText}>Request parts</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          </>
+        ) : null}
+
+        {activeView === 'returns' ? (
+          <>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>My returns</Text>
+              <View style={styles.countBadge}>
+                <Text style={styles.countText}>{partReturns.length}</Text>
+              </View>
+            </View>
+            <View style={styles.list}>
+              {partReturns.length > 0 ? (
+                partReturns.map((ret, i) => {
+                  const statusLabel = formatReturnStatus(ret.status);
+                  const badgeColor = statusColor(colors, statusLabel);
+                  return (
+                    <Animated.View key={ret.id} entering={FadeInUp.delay(i * 30)} layout={Layout.springify()}>
+                      <Card style={styles.historyCard}>
+                        <View style={styles.historyCardTop}>
+                          <Text style={styles.historyCardId}>{ret.id.slice(0, 8).toUpperCase()}</Text>
+                          <View style={[styles.statusBadge, { backgroundColor: badgeColor + '18' }]}>
+                            <Text style={[styles.statusBadgeText, { color: badgeColor }]}>{statusLabel}</Text>
+                          </View>
+                        </View>
+                        <Text style={styles.historyCardMeta}>
+                          {ret.reason} · → {ret.destination} · {formatShortDate(ret.createdAt)}
+                        </Text>
+                        <Text style={styles.historyCardLines} numberOfLines={3}>
+                          {ret.lines.map((l) => `${l.quantity}× ${l.name}`).join(', ')}
+                        </Text>
+                        {ret.workOrderId ? (
+                          <Text style={styles.historyCardWo}>WO: {ret.workOrderId}</Text>
+                        ) : null}
+                        {ret.notes ? (
+                          <Text style={styles.historyCardNotes} numberOfLines={2}>
+                            {ret.notes}
+                          </Text>
+                        ) : null}
+                      </Card>
+                    </Animated.View>
+                  );
+                })
+              ) : loading ? null : (
+                <View style={styles.emptyState}>
+                  <Text style={styles.emptyStateText}>No returns submitted yet.</Text>
+                  <TouchableOpacity style={styles.reqBtnSmall} onPress={() => setShowReturnModal(true)}>
+                    <Text style={[styles.reqBtnText, { color: '#0d9488' }]}>Return parts</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          </>
+        ) : null}
+
+        {activeView === 'stock' ? (
+          <>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Van Stock</Text>
           <View style={styles.countBadge}>
@@ -216,17 +579,33 @@ export default function InventoryScreen() {
                       </View>
                     </View>
 
-                    {isBelowMin && (
+                    {(isBelowMin || item.quantity > 0) && (
                       <View style={[styles.lowStockFooter, { borderTopColor: colors.border + '33' }]}>
-                        <Text style={[styles.lowStockText, { color: stockColor }]}>
-                          Below min stock ({item.minStock})
-                        </Text>
-                        <TouchableOpacity
-                          style={[styles.reqBtnSmall, { backgroundColor: colors.primary + '15' }]}
-                          onPress={() => openRequestWithItem(item)}
-                        >
-                          <Text style={styles.reqBtnText}>Request</Text>
-                        </TouchableOpacity>
+                        {isBelowMin ? (
+                          <Text style={[styles.lowStockText, { color: stockColor }]}>
+                            Below min ({item.minStock})
+                          </Text>
+                        ) : (
+                          <View style={{ flex: 1 }} />
+                        )}
+                        <View style={styles.cardActions}>
+                          {item.quantity > 0 && (
+                            <TouchableOpacity
+                              style={[styles.reqBtnSmall, { backgroundColor: '#0d948815' }]}
+                              onPress={() => setShowReturnModal(true)}
+                            >
+                              <Text style={[styles.reqBtnText, { color: '#0d9488' }]}>Return</Text>
+                            </TouchableOpacity>
+                          )}
+                          {isBelowMin && (
+                            <TouchableOpacity
+                              style={[styles.reqBtnSmall, { backgroundColor: colors.primary + '15' }]}
+                              onPress={() => openRequestWithItem(item)}
+                            >
+                              <Text style={styles.reqBtnText}>Request</Text>
+                            </TouchableOpacity>
+                          )}
+                        </View>
                       </View>
                     )}
                   </Card>
@@ -239,7 +618,15 @@ export default function InventoryScreen() {
             </View>
           )}
         </View>
+          </>
+        ) : null}
       </ScrollView>
+
+      <ReturnPartsModal
+        visible={showReturnModal}
+        onClose={() => setShowReturnModal(false)}
+        onSubmit={handleSubmitReturn}
+      />
 
       {/* Request Modal */}
       <Modal
@@ -267,20 +654,13 @@ export default function InventoryScreen() {
             </View>
 
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 24 }}>
-              <Text style={styles.label}>Part Name *</Text>
-              <TextInput
-                value={reqPartName}
-                onChangeText={setReqPartName}
-                placeholder="Enter part name"
-                style={styles.input}
-              />
-
-              <Text style={styles.label}>Part Number</Text>
-              <TextInput
-                value={reqPartNumber}
-                onChangeText={setReqPartNumber}
-                placeholder="e.g. AF-2020-2"
-                style={styles.input}
+              <PartSelectField
+                label="Part *"
+                placeholder={catalogLoading ? 'Loading parts...' : 'Select part to request'}
+                items={requestCatalog}
+                value={selectedRequestPart}
+                onChange={setSelectedRequestPart}
+                disabled={catalogLoading}
               />
 
               <Text style={styles.label}>Quantity *</Text>
@@ -332,11 +712,14 @@ export default function InventoryScreen() {
               >
                 <Text style={styles.cancelBtnText}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity 
-                style={styles.submitBtn}
-                onPress={handleSubmitRequest}
+              <TouchableOpacity
+                style={[styles.submitBtn, submitting && { opacity: 0.6 }]}
+                onPress={() => void handleSubmitRequest()}
+                disabled={submitting}
               >
-                <Text style={styles.submitBtnText}>Submit Request</Text>
+                <Text style={styles.submitBtnText}>
+                  {submitting ? 'Submitting…' : 'Submit Request'}
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -355,19 +738,43 @@ const getStyles = (colors: any, shadows: any, isDark: boolean) => StyleSheet.cre
     paddingTop: 16,
     marginTop: 0,
   },
-  requestButtonHeader: {
+  headerActions: { flexDirection: 'row', gap: 8 },
+  headerActionBtn: {
     backgroundColor: isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.05)',
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.1)',
   },
-  requestButtonHeaderText: {
+  returnHeaderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderColor: isDark ? 'rgba(153,246,228,0.4)' : '#99f6e4',
+  },
+  headerActionText: {
     color: isDark ? '#FFFFFF' : colors.primary,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
   },
+  returnHeaderText: { color: isDark ? '#99f6e4' : '#0d9488' },
+  historyCard: { padding: 14, marginBottom: 8, backgroundColor: colors.card },
+  historyCardTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  historyCardId: { fontSize: 11, fontWeight: '800', color: colors.primary },
+  statusBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
+  statusBadgeText: { fontSize: 10, fontWeight: '800', textTransform: 'uppercase' },
+  historyCardMeta: { fontSize: 12, color: colors.mutedForeground, marginBottom: 6 },
+  historyCardLines: { fontSize: 13, color: colors.foreground, lineHeight: 18 },
+  historyCardWo: { fontSize: 11, color: colors.mutedForeground, marginTop: 6, fontWeight: '600' },
+  historyCardNotes: { fontSize: 12, color: colors.mutedForeground, marginTop: 6, fontStyle: 'italic' },
+  historyCardReject: { fontSize: 12, color: colors.destructive, marginTop: 6, fontWeight: '600' },
+  cardActions: { flexDirection: 'row', gap: 8 },
   scrollContent: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 100 },
   sectionHeader: {
     flexDirection: 'row',
@@ -413,6 +820,9 @@ const getStyles = (colors: any, shadows: any, isDark: boolean) => StyleSheet.cre
   filterScroll: { marginTop: 12 },
   filterRow: { flexDirection: 'row', gap: 8 },
   filterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 20,
@@ -464,6 +874,8 @@ const getStyles = (colors: any, shadows: any, isDark: boolean) => StyleSheet.cre
   reqBtnText: { fontSize: 11, fontWeight: '700', color: colors.primary },
   emptyState: { padding: 40, alignItems: 'center' },
   emptyStateText: { color: colors.mutedForeground, fontSize: 14 },
+  loadingBox: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 12 },
+  errorText: { color: colors.destructive, textAlign: 'center', fontSize: 14 },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',

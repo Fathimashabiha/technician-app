@@ -7,25 +7,31 @@ import {
   TouchableOpacity,
   StatusBar,
   Modal,
-  Pressable
+  Pressable,
+  Alert,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import type { CompositeNavigationProp } from '@react-navigation/native';
+import { useFocusEffect } from '@react-navigation/native';
+
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
-import type { RootStackParamList, TabParamList } from '@/app/types/navigation';
-import type { WorkOrder } from '@/data/mockData';
+import type { MoreStackParamList } from '@/app/types/navigation';
 import { Calendar, Clock, ChevronLeft, ChevronRight, AlertCircle, CalendarClock } from 'lucide-react-native';
-import { workOrders } from '@/data/mockData';
+import {
+  listMyPpmSchedules,
+  matchesPpmStatusTab,
+  normalizePpmStatus,
+  ppmStatusForBadge,
+  type PpmSchedule,
+  type PpmStatusTab,
+} from '@/lib/ppmService';
+import { ApiError } from '@/lib/api';
 import { StatusBadge } from '@/components/StatusBadge';
 import { PageHeader } from '@/components/PageHeader';
 import { Card } from '@/components/ui/Card';
 import { COLORS, SHADOWS, useTheme } from '@/app/constants/theme';
 import Animated, { FadeInUp } from 'react-native-reanimated';
 
-type NavigationProp = CompositeNavigationProp<BottomTabNavigationProp<TabParamList>, NativeStackNavigationProp<RootStackParamList>>;
-
-const ppmOrders = workOrders.filter((w: WorkOrder) => w.type === 'PPM');
+type NavigationProp = NativeStackNavigationProp<MoreStackParamList>;
 
 // Helper to format date uniformly as YYYY-MM-DD
 const formatDateStr = (year: number, month: number, day: number) => {
@@ -34,10 +40,38 @@ const formatDateStr = (year: number, month: number, day: number) => {
   return `${year}-${m}-${d}`;
 };
 
+/** API due dates are UTC ISO strings — use the calendar date portion for filters. */
+const dueDateKey = (iso: string) => iso.slice(0, 10);
+
+const monthKey = (year: number, month: number) =>
+  `${year}-${(month + 1).toString().padStart(2, '0')}`;
+
 export default function PPMScreen() {
   const navigation = useNavigation<NavigationProp>();
   const { colors, isDark } = useTheme();
   const styles = getStyles(colors);
+  const [ppmSchedules, setPpmSchedules] = useState<PpmSchedule[]>([]);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      let cancelled = false;
+      void (async () => {
+        try {
+          const rows = await listMyPpmSchedules();
+          if (!cancelled) setPpmSchedules(rows.filter((r) => !!r.dueDate));
+        } catch (err) {
+          if (cancelled) return;
+          const message =
+            err instanceof ApiError ? err.message : 'Could not load PPM schedules';
+          Alert.alert('PPM Sync', message);
+          setPpmSchedules([]);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }, [])
+  );
 
   // Use March 2024 as default to match the mock data, or default to now if you prefer.
   const now = new Date();
@@ -46,7 +80,8 @@ export default function PPMScreen() {
   const [pendingReschedules, setPendingReschedules] = useState<Set<string>>(new Set());
   const [rescheduleModalVisible, setRescheduleModalVisible] = useState(false);
   const [targetWoId, setTargetWoId] = useState<string | null>(null);
-  const [filterMode, setFilterMode] = useState<'selected' | 'today' | 'weekly' | 'monthly'>('selected');
+  const [filterMode, setFilterMode] = useState<'all' | 'selected' | 'today' | 'weekly' | 'monthly'>('all');
+  const [statusTab, setStatusTab] = useState<PpmStatusTab>('all');
 
   // Month Math
   const year = currentMonth.getFullYear();
@@ -61,8 +96,30 @@ export default function PPMScreen() {
   const handlePrevMonth = () => setCurrentMonth(new Date(year, month - 1, 1));
   const handleNextMonth = () => setCurrentMonth(new Date(year, month + 1, 1));
 
-  // Determine if a day has a PPM order
-  const hasOrders = (dateStr: string) => ppmOrders.some(wo => wo.dueDate === dateStr);
+  const statusTabOptions: { id: PpmStatusTab; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'assigned', label: 'Assigned' },
+    { id: 'in_progress', label: 'In Progress' },
+  ];
+
+  const assignedCount = ppmSchedules.filter(
+    (row) => normalizePpmStatus(row.status) === 'SCHEDULED',
+  ).length;
+  const inProgressCount = ppmSchedules.filter(
+    (row) => normalizePpmStatus(row.status) === 'IN_PROGRESS',
+  ).length;
+
+  const statusTabCount = (tab: PpmStatusTab) => {
+    if (tab === 'assigned') return assignedCount;
+    if (tab === 'in_progress') return inProgressCount;
+    return ppmSchedules.length;
+  };
+
+  // Determine if a day has a PPM order (respects status tab)
+  const hasOrders = (dateStr: string) =>
+    ppmSchedules
+      .filter((row) => matchesPpmStatusTab(row, statusTab))
+      .some((row) => dueDateKey(row.dueDate) === dateStr);
 
   const handleRescheduleClick = (woId: string) => {
     setTargetWoId(woId);
@@ -84,52 +141,64 @@ export default function PPMScreen() {
   const todayRef = formatDateStr(now.getFullYear(), now.getMonth(), now.getDate());
   
   // Calculate Summary metrics
-  const todayCount = ppmOrders.filter(wo => wo.dueDate === todayRef).length;
-  
-  // Real Weekly count (7 days from now)
-  const weeklyCount = ppmOrders.filter(wo => {
-    const woDate = new Date(wo.dueDate);
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - now.getDay());
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6);
-    return woDate >= startOfWeek && woDate <= endOfWeek;
+  const allCount = ppmSchedules.length;
+  const todayCount = ppmSchedules.filter((row) => dueDateKey(row.dueDate) === todayRef).length;
+
+  const startOfWeek = new Date(now);
+  startOfWeek.setHours(0, 0, 0, 0);
+  startOfWeek.setDate(now.getDate() - now.getDay());
+  const endOfWeek = new Date(startOfWeek);
+  endOfWeek.setDate(startOfWeek.getDate() + 6);
+  const weekStartKey = formatDateStr(startOfWeek.getFullYear(), startOfWeek.getMonth(), startOfWeek.getDate());
+  const weekEndKey = formatDateStr(endOfWeek.getFullYear(), endOfWeek.getMonth(), endOfWeek.getDate());
+
+  const weeklyCount = ppmSchedules.filter((row) => {
+    const key = dueDateKey(row.dueDate);
+    return key >= weekStartKey && key <= weekEndKey;
   }).length;
 
-  // Real Monthly count (Current Month)
-  const monthlyCount = ppmOrders.filter(wo => {
-    const woDate = new Date(wo.dueDate);
-    return woDate.getMonth() === now.getMonth() && woDate.getFullYear() === now.getFullYear();
-  }).length;
+  const visibleMonthKey = monthKey(year, month);
+  const monthlyCount = ppmSchedules.filter(
+    (row) => dueDateKey(row.dueDate).slice(0, 7) === visibleMonthKey
+  ).length;
 
-  // Filter the list based on filterMode
-  const getFilteredOrders = () => {
-    if (filterMode === 'selected') return ppmOrders.filter(wo => wo.dueDate === selectedDate);
-    if (filterMode === 'today') return ppmOrders.filter(wo => wo.dueDate === todayRef);
+  const getDateFilteredOrders = () => {
+    if (filterMode === 'all') return ppmSchedules;
+    if (filterMode === 'selected')
+      return ppmSchedules.filter((row) => dueDateKey(row.dueDate) === selectedDate);
+    if (filterMode === 'today')
+      return ppmSchedules.filter((row) => dueDateKey(row.dueDate) === todayRef);
     if (filterMode === 'weekly') {
-      const startOfWeek = new Date(now);
-      startOfWeek.setDate(now.getDate() - now.getDay());
-      const endOfWeek = new Date(startOfWeek);
-      endOfWeek.setDate(startOfWeek.getDate() + 6);
-      return ppmOrders.filter(wo => {
-        const woDate = new Date(wo.dueDate);
-        return woDate >= startOfWeek && woDate <= endOfWeek;
+      return ppmSchedules.filter((row) => {
+        const key = dueDateKey(row.dueDate);
+        return key >= weekStartKey && key <= weekEndKey;
       });
     }
-    if (filterMode === 'monthly') return ppmOrders.filter(wo => {
-      const woDate = new Date(wo.dueDate);
-      return woDate.getMonth() === now.getMonth() && woDate.getFullYear() === now.getFullYear();
-    });
+    if (filterMode === 'monthly') {
+      return ppmSchedules.filter(
+        (row) => dueDateKey(row.dueDate).slice(0, 7) === visibleMonthKey
+      );
+    }
     return [];
   };
 
-  const filteredOrders = getFilteredOrders();
+  const filteredOrders = getDateFilteredOrders().filter((row) =>
+    matchesPpmStatusTab(row, statusTab)
+  );
 
   const getSectionTitle = () => {
-    if (filterMode === 'today') return 'TASKS FOR TODAY';
-    if (filterMode === 'weekly') return 'TASKS FOR THIS WEEK';
-    if (filterMode === 'monthly') return 'TASKS FOR THIS MONTH';
-    return `TASKS FOR ${selectedDate === formatDateStr(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) ? 'TODAY' : selectedDate}`;
+    const statusPrefix =
+      statusTab === 'assigned'
+        ? 'ASSIGNED'
+        : statusTab === 'in_progress'
+          ? 'IN PROGRESS'
+          : 'ALL SCHEDULED';
+
+    if (filterMode === 'all') return `${statusPrefix} TASKS`;
+    if (filterMode === 'today') return `${statusPrefix} — TODAY`;
+    if (filterMode === 'weekly') return `${statusPrefix} — THIS WEEK`;
+    if (filterMode === 'monthly') return `${statusPrefix} — ${monthNames[month].toUpperCase()} ${year}`;
+    return `${statusPrefix} — ${selectedDate === todayRef ? 'TODAY' : selectedDate}`;
   };
 
   // Generate Calendar Grid
@@ -197,6 +266,17 @@ export default function PPMScreen() {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.summaryBar}>
+          <TouchableOpacity
+            onPress={() => setFilterMode('all')}
+            style={[
+              styles.summaryItem,
+              { backgroundColor: colors.card, borderColor: colors.border },
+              filterMode === 'all' && { borderColor: colors.foreground, borderWidth: 1 },
+            ]}
+          >
+            <Text style={[styles.summaryLabel, { color: colors.foreground }]}>ALL</Text>
+            <Text style={[styles.summaryValue, { color: colors.foreground }]}>{allCount}</Text>
+          </TouchableOpacity>
           <TouchableOpacity 
             onPress={() => setFilterMode('today')}
             style={[
@@ -234,6 +314,29 @@ export default function PPMScreen() {
 
         {renderCalendar()}
 
+        <View style={styles.statusTabBar}>
+          {statusTabOptions.map((tab) => {
+            const active = statusTab === tab.id;
+            return (
+              <TouchableOpacity
+                key={tab.id}
+                onPress={() => setStatusTab(tab.id)}
+                style={[
+                  styles.statusTab,
+                  active && styles.statusTabActive,
+                ]}
+              >
+                <Text style={[styles.statusTabText, active && styles.statusTabTextActive]}>
+                  {tab.label}
+                </Text>
+                <Text style={[styles.statusTabCount, active && styles.statusTabCountActive]}>
+                  {statusTabCount(tab.id)}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>
             {getSectionTitle()}
@@ -247,35 +350,44 @@ export default function PPMScreen() {
           </View>
         ) : (
           <View style={styles.list}>
-            {filteredOrders.map((wo: WorkOrder, i: number) => {
-              const isPendingReschedule = pendingReschedules.has(wo.id);
+            {filteredOrders.map((schedule, i: number) => {
+              const isPendingReschedule = pendingReschedules.has(schedule.id);
 
               return (
-                <Animated.View key={wo.id} entering={FadeInUp.delay(i * 30)}>
+                <Animated.View key={schedule.id} entering={FadeInUp.delay(i * 30)}>
                   <Card style={styles.ppmCard}>
                     <View style={styles.cardHeader}>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.jobTitle}>{wo.title}</Text>
-                        <Text style={styles.jobSub}>{wo.assetName} • {wo.location}</Text>
+                        <Text style={styles.jobTitle}>{schedule.title}</Text>
+                        <Text style={styles.jobSub}>
+                          {(schedule.ppmCode ? `${schedule.ppmCode} • ` : '') + schedule.id.slice(0, 8)}
+                        </Text>
                       </View>
-                      <StatusBadge status={wo.status} />
+                      <StatusBadge status={ppmStatusForBadge(schedule.status)} />
                     </View>
                     
                     <View style={styles.cardMeta}>
                       <View style={styles.metaItem}>
                         <Calendar size={12} color={colors.mutedForeground} />
-                        <Text style={styles.metaText}>{wo.dueDate}</Text>
+                        <Text style={styles.metaText}>{dueDateKey(schedule.dueDate)}</Text>
                       </View>
                       <View style={styles.metaItem}>
                         <Clock size={12} color={colors.mutedForeground} />
-                        <Text style={styles.metaText}>{wo.estimatedTime}</Text>
+                        <Text style={styles.metaText}>
+                          {ppmStatusForBadge(schedule.status)}
+                        </Text>
                       </View>
                     </View>
 
                     <View style={styles.cardActions}>
                       <TouchableOpacity 
                         style={styles.executeBtn}
-                        onPress={() => navigation.navigate('Maintenance', { screen: 'WorkOrderDetails', params: { id: wo.id } })}
+                        onPress={() => {
+                          navigation.navigate('PpmExecutionDetails', {
+                            scheduleId: schedule.id,
+                            title: schedule.title,
+                          });
+                        }}
                       >
                         <Text style={styles.executeBtnText}>Execute</Text>
                       </TouchableOpacity>
@@ -288,7 +400,7 @@ export default function PPMScreen() {
                       ) : (
                         <TouchableOpacity 
                           style={styles.rescheduleBtn}
-                          onPress={() => handleRescheduleClick(wo.id)}
+                          onPress={() => handleRescheduleClick(schedule.id)}
                         >
                           <Text style={styles.rescheduleBtnText}>Reschedule</Text>
                         </TouchableOpacity>
@@ -394,6 +506,49 @@ const getStyles = (colors: any) => StyleSheet.create({
   calDayTextActive: { color: '#FFF' },
   calDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: colors.primary, marginTop: 4 },
   calDotActive: { backgroundColor: '#FFF' },
+  statusTabBar: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
+    backgroundColor: colors.panel,
+    borderRadius: 14,
+    padding: 4,
+  },
+  statusTab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  statusTabActive: {
+    backgroundColor: colors.card,
+    ...SHADOWS.card,
+  },
+  statusTabText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.mutedForeground,
+  },
+  statusTabTextActive: {
+    color: colors.foreground,
+  },
+  statusTabCount: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.mutedForeground,
+    backgroundColor: colors.muted + '30',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  statusTabCountActive: {
+    color: colors.primary,
+    backgroundColor: colors.primary + '15',
+  },
   sectionHeader: { marginBottom: 12 },
   sectionTitle: { fontSize: 11, fontWeight: '800', color: colors.mutedForeground, letterSpacing: 0.5 },
   emptyState: { alignItems: 'center', justifyContent: 'center', paddingVertical: 40, marginTop: 40 },

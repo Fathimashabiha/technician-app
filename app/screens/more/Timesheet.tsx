@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   View,
   Text,
@@ -15,7 +15,7 @@ import {
   X, AlertCircle, CheckCircle2, ShieldCheck, Zap, ClipboardList, Timer, Circle, PlayCircle, PauseCircle, CheckCircle 
 } from 'lucide-react-native';
 import { useRoute, useNavigation } from '@react-navigation/native';
-import { timesheetEntries, TimesheetEntry } from '@/data/mockData';
+import { useFocusEffect } from '@react-navigation/native';
 import { StatusBadge } from '@/components/StatusBadge';
 import { PageHeader } from '@/components/PageHeader';
 import { Card } from '@/components/ui/Card';
@@ -23,6 +23,16 @@ import { Button } from '@/components/ui/Button';
 import { COLORS, GRADIENTS, SHADOWS, useTheme } from '@/app/constants/theme';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { FadeInUp, FadeInDown } from 'react-native-reanimated';
+import {
+  getTimesheetSummary,
+  listTimesheets,
+  submitTimesheet,
+  syncTimesheetsFromWorkOrders,
+  isTimesheetHoldEvent,
+  isTimesheetResumeEvent,
+  type TimesheetEntry,
+  type TimesheetSummary,
+} from '@/lib/timesheetService';
 
 export default function TimesheetScreen() {
   const { colors, gradients, shadows, isDark } = useTheme();
@@ -30,22 +40,50 @@ export default function TimesheetScreen() {
   const route = useRoute();
   const navigation = useNavigation();
   const fromDashboard = (route.params as any)?.fromDashboard;
-  const [entries, setEntries] = useState(timesheetEntries);
+  const [entries, setEntries] = useState<TimesheetEntry[]>([]);
+  const [summary, setSummary] = useState<TimesheetSummary | null>(null);
+  const [loading, setLoading] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<TimesheetEntry | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = () => {
+  const loadTimesheets = useCallback(async () => {
+    setLoading(true);
+    try {
+      try {
+        await syncTimesheetsFromWorkOrders();
+      } catch {
+        // best-effort
+      }
+      const [summaryData, entriesData] = await Promise.all([
+        getTimesheetSummary(),
+        listTimesheets(),
+      ]);
+      setSummary(summaryData);
+      setEntries(entriesData);
+    } catch {
+      // keep empty state if backend unavailable
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadTimesheets();
+    }, [loadTimesheets])
+  );
+
+  const handleSubmit = async () => {
     if (!selectedEntry) return;
     setIsSubmitting(true);
-    
-    // Simulate API call
-    setTimeout(() => {
-      setEntries(prev => prev.map(e => 
-        e.id === selectedEntry.id ? { ...e, status: 'Submitted' } : e
-      ));
+    try {
+      const updated = await submitTimesheet(selectedEntry.id);
+      setEntries(prev => prev.map(e => (e.id === updated.id ? updated : e)));
+      await loadTimesheets();
+    } finally {
       setIsSubmitting(false);
       setSelectedEntry(null);
-    }, 1500);
+    }
   };
   return (
     <View style={styles.container}>
@@ -76,22 +114,28 @@ export default function TimesheetScreen() {
           <Text style={styles.summaryLabel}>This Week</Text>
           <View style={styles.summaryMain}>
             <View>
-              <Text style={styles.summaryHours}>24.0h</Text>
-              <Text style={styles.summaryTarget}>of 40h target</Text>
+              <Text style={styles.summaryHours}>{summary?.totalHoursLabel ?? '0.0h'}</Text>
+              <Text style={styles.summaryTarget}>of {summary?.targetHoursLabel ?? '40h'} target</Text>
             </View>
             <View style={styles.summaryRight}>
-              <Text style={styles.summaryShifts}>3 shifts</Text>
-              <Text style={styles.summaryJobs}>6 jobs completed</Text>
+              <Text style={styles.summaryShifts}>{summary?.shiftCount ?? 0} shifts</Text>
+              <Text style={styles.summaryJobs}>{summary?.jobsCompleted ?? 0} jobs completed</Text>
             </View>
           </View>
           <View style={styles.progressContainer}>
-            <View style={[styles.progressBar, { width: '60%' }]} />
+            <View style={[styles.progressBar, { width: `${Math.min(summary?.progressPercent ?? 0, 100)}%` }]} />
           </View>
         </LinearGradient>
 
         {/* Entries List */}
         <View style={styles.list}>
-          {entries.map((entry, i) => (
+          {loading ? (
+            <Text style={styles.entryTimeRange}>Loading timesheets...</Text>
+          ) : entries.length === 0 ? (
+            <Text style={styles.entryTimeRange}>
+              No timesheet entries yet. Complete a task from Tasks to add today&apos;s draft automatically.
+            </Text>
+          ) : entries.map((entry, i) => (
             <Animated.View
               key={entry.id}
               entering={FadeInUp.delay(i * 30)}
@@ -112,7 +156,7 @@ export default function TimesheetScreen() {
                   </View>
 
                   <View style={styles.jobsList}>
-                    {entry.jobs.map(job => (
+                  {entry.jobs.map(job => (
                       <View key={job.woId} style={styles.jobItem}>
                         <View style={styles.jobInfo}>
                           <Clock size={10} color={colors.mutedForeground} />
@@ -182,9 +226,9 @@ export default function TimesheetScreen() {
                   <Text style={styles.breakdownTitle}>JOB PERFORMANCE & LIFECYCLE</Text>
                   <ScrollView style={styles.jobScroll} showsVerticalScrollIndicator={false}>
                     {selectedEntry.jobs.map((job) => {
-                      const holdCount = job.timeline.filter(e => e.event === 'On Hold').length;
+                      const holdCount = job.timeline.filter((e) => isTimesheetHoldEvent(e.event)).length;
                       const holdReasons = job.timeline
-                        .filter(e => e.event === 'On Hold' && e.note)
+                        .filter((e) => isTimesheetHoldEvent(e.event) && e.note)
                         .map(e => e.note);
 
                       return (
@@ -259,7 +303,7 @@ export default function TimesheetScreen() {
                             {job.timeline.map((ev, idx) => (
                               <View key={idx} style={styles.timelineItem}>
                                 <View style={styles.timelineLeft}>
-                                  <View style={[styles.timelineDot, ev.event === 'Completed' && { backgroundColor: colors.success }, ev.event === 'On Hold' && { backgroundColor: '#F5A623' }]} />
+                                  <View style={[styles.timelineDot, ev.event === 'Completed' && { backgroundColor: colors.success }, isTimesheetHoldEvent(ev.event) && { backgroundColor: '#F5A623' }, isTimesheetResumeEvent(ev.event) && { backgroundColor: colors.primary }]} />
                                   {idx < job.timeline.length - 1 && <View style={styles.timelineLine} />}
                                 </View>
                                 <View style={styles.timelineRight}>

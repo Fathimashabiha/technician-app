@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   View,
   Text,
@@ -7,6 +8,7 @@ import {
   TouchableOpacity,
   TextInput,
   StatusBar,
+  ActivityIndicator,
 } from 'react-native';
 import { useNavigation, useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -14,9 +16,11 @@ import type { CompositeNavigationProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import type { RootStackParamList, TabParamList } from '@/app/types/navigation';
-import type { WorkOrder } from '@/data/mockData';
+import type { WorkOrder } from '@/lib/types/workOrder';
 import { Search, SlidersHorizontal, ChevronRight, Plus, Activity } from 'lucide-react-native';
-import { workOrders } from '@/data/mockData';
+import { useWorkOrders } from '@/lib/hooks/useWorkOrders';
+import { workOrderTypeLabel } from '@/lib/workOrderService';
+import { fetchMyIntakeRequests } from '@/lib/intakeService';
 import { StatusBadge } from '@/components/StatusBadge';
 import { PageHeader } from '@/components/PageHeader';
 import { useTheme } from '@/app/constants/theme';
@@ -32,24 +36,41 @@ export default function WorkOrdersScreen() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [typeFilter, setTypeFilter] = useState('All');
+  const { workOrders, loading, error, reload } = useWorkOrders();
+  const [pendingRequestCount, setPendingRequestCount] = useState(0);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchMyIntakeRequests()
+        .then((rows) => setPendingRequestCount(rows.length))
+        .catch(() => setPendingRequestCount(0));
+    }, [])
+  );
 
   const statuses = ['All', 'Assigned', 'In Progress'];
-  const types = ['All', 'Breakdown', 'Corrective', 'PPM', 'Inspection'];
+  const types = ['All', 'Breakdown', 'Reactive'];
 
-  const filtered = workOrders.filter((wo: WorkOrder) => {
+  const filtered = useMemo(() => workOrders.filter((wo: WorkOrder) => {
     const matchSearch =
       wo.title.toLowerCase().includes(search.toLowerCase()) ||
       wo.id.toLowerCase().includes(search.toLowerCase());
-    
-    // Base rule: Always exclude final statuses (they go to History)
+
+    // PPM and Inspection live on their own screens (dashboard / More), not Tasks
+    if (wo.type === 'PPM' || wo.type === 'Inspection') return false;
+
+    // Final statuses go to History; pending approval goes to My Requests
     const isFinalStatus = ['Completed', 'Verified', 'Closed'].includes(wo.status);
-    const matchStatus = statusFilter === 'All' 
-      ? !isFinalStatus 
-      : wo.status === statusFilter && !isFinalStatus;
-      
-    const matchType = typeFilter === 'All' || wo.type === typeFilter;
+    const isPendingApproval = wo.status === 'Pending Approval';
+    const matchStatus = statusFilter === 'All'
+      ? !isFinalStatus && !isPendingApproval
+      : wo.status === statusFilter && !isFinalStatus && !isPendingApproval;
+
+    const matchType =
+      typeFilter === 'All' ||
+      wo.type === typeFilter ||
+      (typeFilter === 'Reactive' && wo.type === 'Corrective');
     return matchSearch && matchStatus && matchType;
-  });
+  }), [workOrders, search, statusFilter, typeFilter]);
 
   const styles = getStyles(colors, isDark, shadows);
 
@@ -64,7 +85,7 @@ export default function WorkOrdersScreen() {
             onPress={() => navigation.navigate('Maintenance', { screen: 'RequestList' } as any)}
           >
             <Activity size={20} color={isDark ? "#FFF" : colors.primary} />
-            <View style={styles.requestBadge} />
+            {pendingRequestCount > 0 ? <View style={styles.requestBadge} /> : null}
           </TouchableOpacity>
         }
       />
@@ -130,7 +151,15 @@ export default function WorkOrdersScreen() {
 
         {/* List */}
         <View style={styles.list}>
-          {filtered.map((wo: WorkOrder, i: number) => (
+          {loading ? (
+            <ActivityIndicator size="large" color={colors.primary} style={{ marginTop: 40 }} />
+          ) : error ? (
+            <TouchableOpacity onPress={() => void reload()} style={{ padding: 24, alignItems: 'center' }}>
+              <Text style={{ color: colors.destructive, textAlign: 'center' }}>{error}</Text>
+              <Text style={{ color: colors.primary, marginTop: 8 }}>Tap to retry</Text>
+            </TouchableOpacity>
+          ) : null}
+          {!loading && !error && filtered.map((wo: WorkOrder, i: number) => (
             <View key={wo.id}>
               <TouchableOpacity
                 onPress={() => navigation.navigate('Maintenance', { screen: 'WorkOrderDetails', params: { id: wo.id } })}
@@ -139,7 +168,7 @@ export default function WorkOrdersScreen() {
               >
                 <View style={styles.woHeader}>
                   <View style={styles.woBadges}>
-                    <StatusBadge status={wo.type} />
+                    <StatusBadge status={workOrderTypeLabel(wo.type)} />
                     <StatusBadge status={wo.priority} />
                   </View>
                   <Text style={styles.dueDate}>{wo.dueDate}</Text>

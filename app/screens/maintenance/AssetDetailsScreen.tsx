@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,7 @@ import {
   ScrollView,
   TouchableOpacity,
   StatusBar,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
@@ -15,7 +16,13 @@ import {
   Video, FileText, Package, ArrowLeft, ShieldCheck, Clock, Zap,
   Wrench, Activity, CheckCircle2, UserPlus
 } from 'lucide-react-native';
-import { assets, manuals, workOrders } from '@/data/mockData';
+import type { Asset } from '@/lib/types/asset';
+import type { AssetManual } from '@/lib/types/assetDocuments';
+import { fetchAssetManuals } from '@/lib/assetDocumentsService';
+import type { WorkOrder, WorkOrderType } from '@/lib/types/workOrder';
+import { fetchExternalAsset } from '@/lib/assetService';
+import { fetchWorkOrders } from '@/lib/workOrderService';
+import { listAssetPpmSchedules, ppmStatusForBadge, type PpmSchedule } from '@/lib/ppmService';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Card } from '@/components/ui/Card';
 import { COLORS, SHADOWS, GRADIENTS, useTheme } from '@/app/constants/theme';
@@ -24,29 +31,171 @@ import Animated, { FadeInUp, FadeInRight } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { MaintenanceStackParamList } from '@/app/types/navigation';
 
+type AssetHistoryEntry =
+  | { kind: 'workorder'; id: string; date: string; workOrder: WorkOrder }
+  | { kind: 'ppm'; id: string; date: string; schedule: PpmSchedule }
+  | { kind: 'inspection'; id: string; date: string; workOrder: WorkOrder };
+
+const SERVICE_WORK_ORDER_TYPES = new Set<WorkOrderType>([
+  'Breakdown',
+  'Reactive',
+  'Corrective',
+  'Other',
+]);
+
+function isServiceWorkOrderType(type: WorkOrderType): boolean {
+  return SERVICE_WORK_ORDER_TYPES.has(type);
+}
+
+function workOrderHistoryLabel(type: WorkOrderType): string {
+  if (type === 'Breakdown') return 'Breakdown';
+  if (type === 'Reactive') return 'Reactive';
+  return 'Service';
+}
+
+function historyDateKey(value: string | undefined): string {
+  if (!value?.trim()) return '';
+  return value.trim().slice(0, 10);
+}
+
+function buildAssetHistoryTimeline(
+  serviceWorkOrders: WorkOrder[],
+  inspectionWorkOrders: WorkOrder[],
+  ppmSchedules: PpmSchedule[],
+): AssetHistoryEntry[] {
+  const entries: AssetHistoryEntry[] = [
+    ...serviceWorkOrders.map((workOrder) => ({
+      kind: 'workorder' as const,
+      id: `wo-${workOrder.id}`,
+      date: historyDateKey(workOrder.completionDate ?? workOrder.dueDate),
+      workOrder,
+    })),
+    ...inspectionWorkOrders.map((workOrder) => ({
+      kind: 'inspection' as const,
+      id: `insp-${workOrder.id}`,
+      date: historyDateKey(workOrder.completionDate ?? workOrder.dueDate),
+      workOrder,
+    })),
+    ...ppmSchedules.map((schedule) => ({
+      kind: 'ppm' as const,
+      id: `ppm-${schedule.id}`,
+      date: historyDateKey(schedule.dueDate),
+      schedule,
+    })),
+  ];
+
+  return entries.sort((a, b) => b.date.localeCompare(a.date));
+}
+
 export default function AssetDetailsScreen() {
   const { colors, gradients, shadows, isDark } = useTheme();
   const styles = getStyles(colors);
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<NativeStackNavigationProp<MaintenanceStackParamList>>();
   const route = useRoute<RouteProp<MaintenanceStackParamList, 'AssetDetails'>>();
-  const { assetId, isReviewMode, workOrderId } = (route.params as any) || {};
+  const {
+    assetId,
+    isReviewMode,
+    workOrderId,
+    scheduleId,
+    returnTo,
+    initialView,
+  } = (route.params as any) || {};
 
-  const [viewMode, setViewMode] = useState<'details' | 'manuals' | 'history'>('details');
+  const [viewMode, setViewMode] = useState<'details' | 'manuals' | 'history'>(
+    initialView ?? 'details'
+  );
+  const [asset, setAsset] = useState<Asset | null>(null);
+  const [serviceWorkOrders, setServiceWorkOrders] = useState<WorkOrder[]>([]);
+  const [inspectionWorkOrders, setInspectionWorkOrders] = useState<WorkOrder[]>([]);
+  const [ppmHistory, setPpmHistory] = useState<PpmSchedule[]>([]);
+  const [assetManuals, setAssetManuals] = useState<AssetManual[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const asset = assets.find(a => a.id === assetId) || assets[0];
-  const assetManuals = manuals.filter(m => m.assetId === asset.id);
+  const loadAsset = useCallback(async () => {
+    try {
+      setLoading(true);
+      setLoadError(null);
+      const [loadedAsset, workOrders, manuals, ppmSchedules] = await Promise.all([
+        fetchExternalAsset(String(assetId)),
+        fetchWorkOrders(),
+        fetchAssetManuals(String(assetId)).catch(() => [] as AssetManual[]),
+        listAssetPpmSchedules(String(assetId)).catch(() => [] as PpmSchedule[]),
+      ]);
+      const forAsset = workOrders.filter((wo) => wo.assetId === loadedAsset.id);
+      setAsset(loadedAsset);
+      setServiceWorkOrders(forAsset.filter((wo) => isServiceWorkOrderType(wo.type)));
+      setInspectionWorkOrders(forAsset.filter((wo) => wo.type === 'Inspection'));
+      setPpmHistory(ppmSchedules);
+      setAssetManuals(manuals);
+    } catch (err: unknown) {
+      setAsset(null);
+      setServiceWorkOrders([]);
+      setInspectionWorkOrders([]);
+      setPpmHistory([]);
+      setAssetManuals([]);
+      setLoadError(err instanceof Error ? err.message : 'Could not load asset from server.');
+    } finally {
+      setLoading(false);
+    }
+  }, [assetId]);
+
+  useEffect(() => {
+    void loadAsset();
+  }, [loadAsset]);
+
+  if (loading) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background, alignItems: 'center', justifyContent: 'center' }}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </SafeAreaView>
+    );
+  }
+
+  if (loadError || !asset) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background, padding: 24 }}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={{ marginBottom: 16 }}>
+          <ArrowLeft size={22} color={colors.foreground} />
+        </TouchableOpacity>
+        <Text style={{ fontSize: 18, fontWeight: '800', color: colors.foreground, marginBottom: 8 }}>
+          Asset not available
+        </Text>
+        <Text style={{ fontSize: 14, color: colors.mutedForeground, lineHeight: 22, marginBottom: 16 }}>
+          {loadError ?? 'Unknown error'}
+        </Text>
+        <TouchableOpacity
+          onPress={() => void loadAsset()}
+          style={{
+            backgroundColor: colors.primary,
+            paddingVertical: 12,
+            borderRadius: 12,
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{ color: '#fff', fontWeight: '700' }}>Retry</Text>
+        </TouchableOpacity>
+      </SafeAreaView>
+    );
+  }
 
   const renderDetails = () => (
     <Animated.View entering={FadeInUp} style={styles.subview}>
       {/* Asset Info Card */}
       <Card variant="elevated" style={styles.assetCard}>
         <View style={styles.assetHeader}>
-          <View>
-            <Text style={styles.assetName}>{asset.name}</Text>
-            <Text style={styles.assetType}>{asset.type} • {asset.id}</Text>
+          <View style={styles.assetTitleRow}>
+            <Text style={styles.assetName} numberOfLines={2}>
+              {asset.name}
+            </Text>
+            <View style={styles.assetStatusWrap}>
+              <StatusBadge status={asset.status} />
+            </View>
           </View>
-          <StatusBadge status={asset.status} />
+          <Text style={styles.assetType} numberOfLines={1}>
+            {asset.type} • {asset.id}
+          </Text>
         </View>
 
         {/* Technical Specs Tab-like Grid */}
@@ -197,81 +346,114 @@ export default function AssetDetailsScreen() {
   );
 
   const renderHistory = () => {
-    const assetHistory = workOrders.filter(wo => wo.assetId === asset.id);
-    const breakdownCount = assetHistory.filter(wo => wo.type === 'Breakdown').length;
-    const ppmCount = assetHistory.filter(wo => wo.type === 'PPM').length;
-    const inspectionCount = assetHistory.filter(wo => wo.type === 'Inspection').length;
+    const breakdownCount = serviceWorkOrders.filter((wo) => wo.type === 'Breakdown').length;
+    const servicesCount = serviceWorkOrders.filter(
+      (wo) => wo.type === 'Reactive' || wo.type === 'Corrective' || wo.type === 'Other',
+    ).length;
+    const timeline = buildAssetHistoryTimeline(serviceWorkOrders, inspectionWorkOrders, ppmHistory);
+
+    const dotColor = (entry: AssetHistoryEntry) => {
+      if (entry.kind === 'ppm') return colors.primary;
+      if (entry.kind === 'inspection') return colors.secondary;
+      if (entry.workOrder.type === 'Breakdown') return colors.destructive;
+      return colors.primary;
+    };
+
+    const openHistoryEntry = (entry: AssetHistoryEntry) => {
+      if (entry.kind === 'ppm') {
+        navigation.navigate('PpmExecutionDetails' as any, { scheduleId: entry.schedule.id });
+        return;
+      }
+      navigation.navigate('WorkOrderDetails' as any, { id: entry.workOrder.id });
+    };
 
     return (
       <Animated.View entering={FadeInRight} style={styles.subview}>
-        {/* History Stats */}
         <View style={styles.historyStatsRow}>
-           <View style={styles.historyStatBox}>
-              <Text style={styles.historyStatVal}>{assetHistory.length}</Text>
-              <Text style={styles.historyStatLab}>Services</Text>
-           </View>
-           <View style={[styles.historyStatBox, { borderLeftWidth: 1, borderLeftColor: colors.border + '20' }]}>
-              <Text style={[styles.historyStatVal, { color: colors.destructive }]}>{breakdownCount}</Text>
-              <Text style={styles.historyStatLab}>Breakdowns</Text>
-           </View>
-           <View style={[styles.historyStatBox, { borderLeftWidth: 1, borderLeftColor: colors.border + '20' }]}>
-              <Text style={[styles.historyStatVal, { color: colors.primary }]}>{ppmCount}</Text>
-              <Text style={styles.historyStatLab}>PPM</Text>
-           </View>
-           <View style={[styles.historyStatBox, { borderLeftWidth: 1, borderLeftColor: colors.border + '20' }]}>
-              <Text style={[styles.historyStatVal, { color: colors.secondary }]}>{inspectionCount}</Text>
-              <Text style={styles.historyStatLab}>Inspections</Text>
-           </View>
+          <View style={styles.historyStatBox}>
+            <Text style={styles.historyStatVal}>{servicesCount}</Text>
+            <Text style={styles.historyStatLab}>Services</Text>
+          </View>
+          <View style={[styles.historyStatBox, { borderLeftWidth: 1, borderLeftColor: colors.border + '20' }]}>
+            <Text style={[styles.historyStatVal, { color: colors.destructive }]}>{breakdownCount}</Text>
+            <Text style={styles.historyStatLab}>Breakdowns</Text>
+          </View>
+          <View style={[styles.historyStatBox, { borderLeftWidth: 1, borderLeftColor: colors.border + '20' }]}>
+            <Text style={[styles.historyStatVal, { color: colors.primary }]}>{ppmHistory.length}</Text>
+            <Text style={styles.historyStatLab}>PPM</Text>
+          </View>
+          <View style={[styles.historyStatBox, { borderLeftWidth: 1, borderLeftColor: colors.border + '20' }]}>
+            <Text style={[styles.historyStatVal, { color: colors.secondary }]}>{inspectionWorkOrders.length}</Text>
+            <Text style={styles.historyStatLab}>Inspections</Text>
+          </View>
         </View>
 
         <Text style={styles.subviewSubtitle}>Service Log — Timeline</Text>
-        
+
         <View style={styles.historyTimeline}>
-          {assetHistory.length === 0 ? (
+          {timeline.length === 0 ? (
             <View style={styles.emptyHistory}>
               <Activity size={32} color={colors.mutedForeground} />
               <Text style={styles.emptyHistoryText}>No service history recorded yet.</Text>
             </View>
           ) : (
-            assetHistory.map((wo, index) => (
-              <View key={wo.id} style={styles.timelineItem}>
-                <View style={styles.timelineLeft}>
-                  <View style={[
-                    styles.timelineDot, 
-                    { backgroundColor: wo.type === 'Breakdown' ? colors.destructive : colors.primary }
-                  ]} />
-                  {index < assetHistory.length - 1 && <View style={styles.timelineLine} />}
-                </View>
-                <TouchableOpacity 
-                  style={styles.timelineRight}
-                  activeOpacity={0.7}
-                  onPress={() => navigation.navigate('WorkOrderDetails' as any, { id: wo.id })}
-                >
-                  <Card style={styles.historyCard}>
-                    <View style={styles.historyCardHeader}>
-                      <Text style={styles.historyWoId}>{wo.id}</Text>
-                      <Text style={styles.historyDate}>{wo.dueDate}</Text>
-                    </View>
-                    <Text style={styles.historyTitle}>{wo.title}</Text>
-                    {wo.completedBy && (
-                      <View style={styles.technicianRow}>
-                         <UserPlus size={12} color={colors.mutedForeground} />
-                         <Text style={styles.technicianName}>Performed by: <Text style={{ color: colors.foreground }}>{wo.completedBy}</Text></Text>
+            timeline.map((entry, index) => {
+              const isPpm = entry.kind === 'ppm';
+              const isInspection = entry.kind === 'inspection';
+              const wo = entry.kind === 'workorder' || entry.kind === 'inspection' ? entry.workOrder : null;
+              const label = isPpm
+                ? 'PPM'
+                : isInspection
+                  ? 'Inspection'
+                  : workOrderHistoryLabel(wo!.type);
+              const title = isPpm ? entry.schedule.title : wo!.title;
+              const refId = isPpm ? (entry.schedule.ppmCode ?? entry.schedule.id) : wo!.id;
+              const date = isPpm ? entry.schedule.dueDate : wo!.dueDate;
+              const status = isPpm ? ppmStatusForBadge(entry.schedule.status) : wo!.status;
+              const typeColor = isPpm
+                ? colors.primary
+                : isInspection
+                  ? colors.secondary
+                  : wo!.type === 'Breakdown'
+                    ? colors.destructive
+                    : colors.primary;
+
+              return (
+                <View key={entry.id} style={styles.timelineItem}>
+                  <View style={styles.timelineLeft}>
+                    <View style={[styles.timelineDot, { backgroundColor: dotColor(entry) }]} />
+                    {index < timeline.length - 1 && <View style={styles.timelineLine} />}
+                  </View>
+                  <TouchableOpacity
+                    style={styles.timelineRight}
+                    activeOpacity={0.7}
+                    onPress={() => openHistoryEntry(entry)}
+                  >
+                    <Card style={styles.historyCard}>
+                      <View style={styles.historyCardHeader}>
+                        <Text style={styles.historyWoId}>{refId}</Text>
+                        <Text style={styles.historyDate}>{date}</Text>
                       </View>
-                    )}
-                    <View style={styles.historyFooter}>
-                       <View style={styles.historyTypeTag}>
-                          <Text style={[
-                            styles.historyTypeText, 
-                            { color: wo.type === 'Breakdown' ? colors.destructive : colors.primary }
-                          ]}>{wo.type}</Text>
-                       </View>
-                       <StatusBadge status={wo.status} />
-                    </View>
-                  </Card>
-                </TouchableOpacity>
-              </View>
-            ))
+                      <Text style={styles.historyTitle}>{title}</Text>
+                      {wo?.completedBy ? (
+                        <View style={styles.technicianRow}>
+                          <UserPlus size={12} color={colors.mutedForeground} />
+                          <Text style={styles.technicianName}>
+                            Performed by: <Text style={{ color: colors.foreground }}>{wo.completedBy}</Text>
+                          </Text>
+                        </View>
+                      ) : null}
+                      <View style={styles.historyFooter}>
+                        <View style={styles.historyTypeTag}>
+                          <Text style={[styles.historyTypeText, { color: typeColor }]}>{label}</Text>
+                        </View>
+                        <StatusBadge status={status} />
+                      </View>
+                    </Card>
+                  </TouchableOpacity>
+                </View>
+              );
+            })
           )}
         </View>
       </Animated.View>
@@ -312,6 +494,13 @@ export default function AssetDetailsScreen() {
             <TouchableOpacity 
               style={styles.confirmBtn}
               onPress={() => {
+                if (returnTo === 'PpmExecutionDetails' && (scheduleId || workOrderId)) {
+                  navigation.navigate('PpmExecutionDetails' as any, {
+                    scheduleId: scheduleId ?? workOrderId,
+                    stepCompleted: 'qr_scan',
+                  } as any);
+                  return;
+                }
                 navigation.navigate('WorkOrderDetails' as any, { 
                   id: workOrderId, 
                   stepCompleted: 'qr_scan' 
@@ -378,16 +567,26 @@ const getStyles = (colors: any) => StyleSheet.create({
     fontWeight: '600',
   },
   assetCard: {
-    padding: 16,
     marginBottom: 16,
+    overflow: 'hidden',
   },
   assetHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     marginBottom: 16,
   },
+  assetTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 4,
+  },
+  assetStatusWrap: {
+    flexShrink: 0,
+    marginTop: 2,
+  },
   assetName: {
+    flex: 1,
+    minWidth: 0,
     fontSize: 20,
     fontWeight: '800',
     color: colors.foreground,

@@ -6,6 +6,9 @@ import {
   TouchableOpacity,
   TextInput,
   StatusBar,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Barcode, CheckCircle2 as CheckCircleIcon } from 'lucide-react-native';
@@ -15,8 +18,8 @@ import { useTheme } from '@/app/constants/theme';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import type { TabParamList } from '@/app/types/navigation';
-import { assets } from '@/data/mockData';
 import AssetQrScanner from '@/components/media/AssetQrScanner';
+import { resolveAssetFromScan } from '@/lib/assetService';
 
 export default function AssetScanScreen() {
   const navigation = useNavigation<BottomTabNavigationProp<TabParamList>>();
@@ -45,25 +48,18 @@ export default function AssetScanScreen() {
     }, 1200);
   };
 
-  const resolveAsset = (scannedValue: string) => {
+  const resolveAsset = async (scannedValue: string) => {
     setVerifying(true);
     setError(null);
 
-    setTimeout(() => {
-      const foundAsset = assets.find(
-        (a: any) =>
-          a.id.toLowerCase() === scannedValue.toLowerCase() ||
-          a.serialNumber?.toLowerCase() === scannedValue.toLowerCase() ||
-          scannedValue.toLowerCase().includes(a.id.toLowerCase()),
-      );
+    const assetId = await resolveAssetFromScan(scannedValue);
+    setVerifying(false);
 
-      if (foundAsset) {
-        handleVerificationSuccess(foundAsset.id);
-      } else {
-        setVerifying(false);
-        setError('Asset not found. Please check the code and try again.');
-      }
-    }, 800);
+    if (assetId) {
+      handleVerificationSuccess(assetId);
+    } else {
+      setError('Asset not found. Please check the code and try again.');
+    }
   };
 
   const handleQrScanned = (data: string) => {
@@ -85,68 +81,80 @@ export default function AssetScanScreen() {
         showBack={false} 
       />
       
-      <View style={styles.mainContent}>
-        <Animated.View entering={FadeIn} style={styles.content}>
-          <Text style={styles.instructionText}>
-            Scan any Asset QR code or Barcode to view immediate technical details, manuals, and history.
-          </Text>
+      <KeyboardAvoidingView
+        style={styles.mainContent}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <ScrollView
+          style={styles.mainContent}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          nestedScrollEnabled
+          showsVerticalScrollIndicator={false}
+        >
+          <Animated.View entering={FadeIn} style={styles.content}>
+            <Text style={styles.instructionText}>
+              Scan any Asset QR code or Barcode to view immediate technical details, manuals, and history.
+            </Text>
 
-          {success ? (
-            <View style={styles.successContainer}>
-              <View style={styles.successIconBubble}>
-                <CheckCircleIcon size={48} color={colors.success} />
-              </View>
-              <Text style={styles.successTitle}>Asset Located!</Text>
-              <Text style={styles.successDesc}>Loading asset dashboard...</Text>
-            </View>
-          ) : (
-            <View style={styles.scannerView}>
-              <View style={styles.scanArea}>
-                <AssetQrScanner
-                  onScanSuccess={handleQrScanned}
-                  isResolving={verifying}
-                  errorMessage={error}
-                />
-              </View>
-
-              {/* Manual Entry */}
-              <Card style={styles.manualEntryCard}>
-                <View style={styles.manualEntryHeader}>
-                  <Barcode size={16} color={colors.primary} />
-                  <Text style={styles.manualEntryTitle}>Manual Entry</Text>
+            {success ? (
+              <View style={styles.successContainer}>
+                <View style={styles.successIconBubble}>
+                  <CheckCircleIcon size={48} color={colors.success} />
                 </View>
-                
-                {error && (
-                  <View style={styles.errorBanner}>
-                    <Text style={styles.errorText}>{error}</Text>
-                  </View>
-                )}
-
-                <View style={styles.manualInputRow}>
-                  <TextInput
-                    placeholder="Enter Asset ID or Serial"
-                    placeholderTextColor={colors.mutedForeground}
-                    value={barcodeInput}
-                    onChangeText={(txt) => {
-                      setBarcodeInput(txt);
-                      if (error) setError(null);
-                    }}
-                    style={styles.barcodeInput}
-                    editable={!verifying}
+                <Text style={styles.successTitle}>Asset Located!</Text>
+                <Text style={styles.successDesc}>Loading asset dashboard...</Text>
+              </View>
+            ) : (
+              <View style={styles.scannerView}>
+                <View style={styles.scanArea}>
+                  <AssetQrScanner
+                    layout="embedded"
+                    hintText="Point at an asset QR or barcode"
+                    onScanSuccess={handleQrScanned}
+                    isResolving={verifying}
+                    errorMessage={null}
                   />
-                  <TouchableOpacity 
-                    onPress={handleBarcodeSubmit} 
-                    style={[styles.lookupBtn, !barcodeInput.trim() && { opacity: 0.5 }]} 
-                    disabled={verifying || !barcodeInput.trim()}
-                  >
-                    <Text style={styles.lookupBtnText}>Lookup</Text>
-                  </TouchableOpacity>
                 </View>
-              </Card>
-            </View>
-          )}
-        </Animated.View>
-      </View>
+
+                <Card style={styles.manualEntryCard}>
+                  <View style={styles.manualEntryHeader}>
+                    <Barcode size={16} color={colors.primary} />
+                    <Text style={styles.manualEntryTitle}>Manual Entry</Text>
+                  </View>
+
+                  {error && (
+                    <View style={styles.errorBanner}>
+                      <Text style={styles.errorText}>{error}</Text>
+                    </View>
+                  )}
+
+                  <View style={styles.manualInputRow}>
+                    <TextInput
+                      placeholder="Enter Asset ID or Serial"
+                      placeholderTextColor={colors.mutedForeground}
+                      value={barcodeInput}
+                      onChangeText={(txt) => {
+                        setBarcodeInput(txt);
+                        if (error) setError(null);
+                      }}
+                      style={styles.barcodeInput}
+                      editable={!verifying}
+                    />
+                    <TouchableOpacity
+                      onPress={handleBarcodeSubmit}
+                      style={[styles.lookupBtn, !barcodeInput.trim() && { opacity: 0.5 }]}
+                      disabled={verifying || !barcodeInput.trim()}
+                    >
+                      <Text style={styles.lookupBtnText}>Lookup</Text>
+                    </TouchableOpacity>
+                  </View>
+                </Card>
+              </View>
+            )}
+          </Animated.View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </View>
   );
 }
@@ -159,11 +167,13 @@ const getStyles = (colors: any, shadows: any) => StyleSheet.create({
   mainContent: {
     flex: 1,
   },
+  scrollContent: {
+    flexGrow: 1,
+    paddingBottom: 40,
+  },
   content: {
     paddingHorizontal: 24,
     paddingTop: 32,
-    paddingBottom: 40,
-    flex: 1,
   },
   instructionText: {
     fontSize: 15,
@@ -178,8 +188,7 @@ const getStyles = (colors: any, shadows: any) => StyleSheet.create({
   },
   scanArea: {
     width: '100%',
-    minHeight: 320,
-    flex: 1,
+    height: 420,
     backgroundColor: '#000',
     borderRadius: 32,
     overflow: 'hidden',
@@ -276,10 +285,9 @@ const getStyles = (colors: any, shadows: any) => StyleSheet.create({
     textAlign: 'center',
   },
   successContainer: {
-    flex: 1,
+    minHeight: 360,
     justifyContent: 'center',
     alignItems: 'center',
-    marginTop: -40,
   },
   successIconBubble: {
     width: 100,
