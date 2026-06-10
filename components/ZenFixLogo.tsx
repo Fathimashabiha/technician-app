@@ -9,7 +9,7 @@ const SIZES: Record<LogoSize, { width: number; height: number }> = {
   sm: { width: 48, height: 48 },
   md: { width: 120, height: 72 },
   lg: { width: 240, height: 140 },
-  splash: { width: 280, height: 160 },
+  splash: { width: 200, height: 200 },
 };
 
 type Props = {
