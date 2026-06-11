@@ -15,7 +15,6 @@ import {
   AppState,
   type AppStateStatus,
 } from 'react-native';
-import { ZenFixLogo } from '@/components/ZenFixLogo';
 import { useFocusEffect } from '@react-navigation/native';
 
 const { width } = Dimensions.get('window');
@@ -66,6 +65,10 @@ import {
   type AttendanceStatusDto,
 } from '@/lib/attendanceService';
 import {
+  AttendanceLocationError,
+  fetchAttendanceLocation,
+} from '@/lib/attendanceLocation';
+import {
   getLocalShiftSession,
   saveLocalShiftSession,
   shiftElapsedSeconds,
@@ -108,11 +111,20 @@ export default function DashboardScreen() {
   const [activeNotice, setActiveNotice] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [attendanceBusy, setAttendanceBusy] = useState(false);
+  const [attendanceBusyLabel, setAttendanceBusyLabel] = useState('');
   const { workOrders, loading: woLoading, reload: reloadWorkOrders } = useWorkOrders();
   const [ppmSchedules, setPpmSchedules] = useState<PpmSchedule[]>([]);
   const [ppmLoading, setPpmLoading] = useState(false);
   const unreadCount = notifications.filter(n => !n.read).length;
   const priorShiftAlertShown = useRef(false);
+  const technicianName = getTechnicianSession()?.name ?? 'Ahmed Rashid';
+  const avatarInitials =
+    technicianName
+      .split(' ')
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() ?? '')
+      .join('') || 'AR';
 
   const applyServerDay = useCallback(
     async (status: AttendanceStatusDto, technicianId: string) => {
@@ -474,13 +486,13 @@ export default function DashboardScreen() {
             <TouchableOpacity
               onPress={() => setShowProfileModal(true)}
               activeOpacity={0.7}
-              style={dynamicStyles.logoButton}
+              style={dynamicStyles.avatarCircle}
             >
-              <ZenFixLogo size="sm" />
+              <Text style={dynamicStyles.avatarInitials}>{avatarInitials}</Text>
             </TouchableOpacity>
             <View>
               <Text style={[dynamicStyles.greeting, { color: isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.5)' }]}>Good Morning</Text>
-              <Text style={[dynamicStyles.userName, { color: isDark ? '#FFF' : colors.foreground }]}>Ahmed Rashid</Text>
+              <Text style={[dynamicStyles.userName, { color: isDark ? '#FFF' : colors.foreground }]}>{technicianName}</Text>
             </View>
           </View>
           <View style={dynamicStyles.headerActions}>
@@ -553,11 +565,14 @@ export default function DashboardScreen() {
               <TouchableOpacity
                 onPress={async () => {
                   setAttendanceBusy(true);
+                  setAttendanceBusyLabel('Getting location...');
                   const technicianId = getTechnicianSession()?.technicianId ?? 'T001';
                   const name = getTechnicianSession()?.name ?? 'Technician';
                   try {
+                    const location = await fetchAttendanceLocation();
+                    setAttendanceBusyLabel('Checking in...');
                     const startedAt = Date.now();
-                    await checkIn(name);
+                    await checkIn(location, name);
                     await saveLocalShiftSession(true, name, startedAt, technicianId);
                     await saveLocalDayAttendance(
                       { dateKey: '', dayState: 'on_shift', startedAt },
@@ -568,6 +583,10 @@ export default function DashboardScreen() {
                     setShiftEndedAt(null);
                     setElapsed(0);
                   } catch (err) {
+                    if (err instanceof AttendanceLocationError) {
+                      Alert.alert('Location required', err.message);
+                      return;
+                    }
                     const message =
                       err instanceof ApiError
                         ? err.message
@@ -597,6 +616,7 @@ export default function DashboardScreen() {
                     );
                   } finally {
                     setAttendanceBusy(false);
+                    setAttendanceBusyLabel('');
                   }
                 }}
                 style={dynamicStyles.checkInButton}
@@ -615,7 +635,7 @@ export default function DashboardScreen() {
                     <Play size={16} color="#FFF" />
                   )}
                   <Text style={dynamicStyles.checkInText}>
-                    {attendanceBusy ? 'Checking in...' : 'Check In'}
+                    {attendanceBusy ? attendanceBusyLabel || 'Checking in...' : 'Check In'}
                   </Text>
                 </LinearGradient>
               </TouchableOpacity>
@@ -625,10 +645,13 @@ export default function DashboardScreen() {
               <TouchableOpacity
                 onPress={async () => {
                   setAttendanceBusy(true);
+                  setAttendanceBusyLabel('Getting location...');
                   const technicianId = getTechnicianSession()?.technicianId ?? 'T001';
                   const endedAt = Date.now();
                   try {
-                    await checkOut();
+                    const location = await fetchAttendanceLocation();
+                    setAttendanceBusyLabel('Checking out...');
+                    await checkOut(location);
                     await saveLocalShiftSession(false, undefined, undefined, technicianId);
                     await saveLocalDayAttendance(
                       {
@@ -647,6 +670,10 @@ export default function DashboardScreen() {
                       );
                     }
                   } catch (err) {
+                    if (err instanceof AttendanceLocationError) {
+                      Alert.alert('Location required', err.message);
+                      return;
+                    }
                     const message =
                       err instanceof ApiError
                         ? err.message
@@ -668,6 +695,7 @@ export default function DashboardScreen() {
                     Alert.alert('Checked out (offline)', message);
                   } finally {
                     setAttendanceBusy(false);
+                    setAttendanceBusyLabel('');
                   }
                 }}
                 style={dynamicStyles.checkInButton}
@@ -686,7 +714,7 @@ export default function DashboardScreen() {
                     <Square size={16} color="#FFF" />
                   )}
                   <Text style={dynamicStyles.checkInText}>
-                    {attendanceBusy ? 'Checking out...' : 'Check Out'}
+                    {attendanceBusy ? attendanceBusyLabel || 'Checking out...' : 'Check Out'}
                   </Text>
                 </LinearGradient>
               </TouchableOpacity>
@@ -1096,17 +1124,18 @@ const getStyles = (colors: any, isDark: boolean) => StyleSheet.create({
     alignItems: 'center',
     gap: 12,
   },
-  logoButton: {
-    width: 52,
-    height: 52,
-    borderRadius: 14,
-    backgroundColor: isDark ? 'rgba(255,255,255,0.12)' : '#FFFFFF',
+  avatarCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: isDark ? 'rgba(255,255,255,0.15)' : colors.primary + '20',
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.06)',
-    overflow: 'hidden',
-    padding: 4,
+  },
+  avatarInitials: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: isDark ? '#FFF' : colors.primary,
   },
   notificationBtn: {
     width: 40,

@@ -1,5 +1,6 @@
 import { apiRequest } from './api';
 import { getTechnicianId } from './technicianSession';
+import type { AttendanceLocation } from './attendanceLocation';
 
 export type AttendanceDayState =
   | 'can_check_in'
@@ -19,21 +20,23 @@ export type AttendanceStatusDto = {
   shiftEndedAt?: string | null;
 };
 
-export async function checkIn(technicianName?: string) {
+export async function checkIn(location: AttendanceLocation, technicianName?: string) {
   return apiRequest<{ message: string }>('/attendance/check-in', {
     method: 'POST',
     body: JSON.stringify({
       technicianId: getTechnicianId(),
       technicianName,
+      location,
     }),
   });
 }
 
-export async function checkOut() {
+export async function checkOut(location: AttendanceLocation) {
   return apiRequest<{ message: string }>('/attendance/check-out', {
     method: 'POST',
     body: JSON.stringify({
       technicianId: getTechnicianId(),
+      location,
     }),
   });
 }
