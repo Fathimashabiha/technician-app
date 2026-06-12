@@ -140,6 +140,8 @@ export type LocalDayAttendance = {
   dayState: AttendanceDayState;
   startedAt?: number;
   endedAt?: number;
+  checkInLocationName?: string;
+  checkOutLocationName?: string;
 };
 
 export async function getLocalDayAttendance(

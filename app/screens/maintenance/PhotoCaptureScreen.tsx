@@ -56,6 +56,7 @@ import {
   type EvidenceItem,
 } from '@/lib/evidenceStorage';
 import { navigateAfterStep } from '@/lib/executionNavigation';
+import { formatCaptureDisplayTime, stampPhoto } from '@/lib/photoWatermark';
 
 type MediaType = 'photo' | 'video' | 'audio';
 const MAX_VIDEO_SECONDS = 60;
@@ -65,8 +66,9 @@ export default function PhotoCaptureScreen() {
   const styles = getStyles(colors);
   const navigation = useNavigation<NativeStackNavigationProp<MaintenanceStackParamList>>();
   const route = useRoute<RouteProp<MaintenanceStackParamList, 'PhotoCapture'>>();
-  const { id, type, initialMode } = route.params;
+  const { id, type, initialMode, scheduleId, returnTo } = route.params;
   const isIntake = type === 'intake';
+  const isPpm = returnTo === 'PpmExecutionDetails' || Boolean(scheduleId);
 
   const cameraRef = useRef<CameraViewType>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
@@ -77,6 +79,7 @@ export default function PhotoCaptureScreen() {
   const [loadingEvidence, setLoadingEvidence] = useState(true);
   const [cameraReady, setCameraReady] = useState(false);
   const [isCapturingPhoto, setIsCapturingPhoto] = useState(false);
+  const [isStampingPhoto, setIsStampingPhoto] = useState(false);
   const [isRecordingVideo, setIsRecordingVideo] = useState(false);
   const [videoRecordSeconds, setVideoRecordSeconds] = useState(0);
   const videoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -97,18 +100,28 @@ export default function PhotoCaptureScreen() {
     : type === 'before'
       ? 'Before Evidence'
       : 'After Evidence';
-  const subtitle = isIntake ? 'New work order' : `WO: ${id}`;
+  const subtitle = isIntake ? 'New work order' : isPpm ? `PPM: ${id}` : `WO: ${id}`;
+  const isProcessingPhoto = isCapturingPhoto || isStampingPhoto;
   const showLiveCamera =
     (mode === 'photo' || mode === 'video') &&
     isExpoCameraAvailable() &&
     cameraPermission?.granted;
 
+  const getJobLabel = useCallback((): string | undefined => {
+    if (isIntake) return 'Intake';
+    if (isPpm) return `PPM: ${id}`;
+    return `WO: ${id}`;
+  }, [id, isIntake, isPpm]);
+
   const addEvidence = useCallback(
-    async (item: Omit<EvidenceItem, 'id' | 'timestamp'>) => {
+    async (item: Omit<EvidenceItem, 'id'>) => {
+      const capturedAt = item.capturedAt ?? new Date().toISOString();
       const newItem: EvidenceItem = {
         ...item,
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        timestamp: new Date().toLocaleTimeString(),
+        capturedAt,
+        displayTime:
+          item.displayTime ?? formatCaptureDisplayTime(new Date(capturedAt)),
       };
 
       setEvidence((prev) => {
@@ -122,6 +135,28 @@ export default function PhotoCaptureScreen() {
       });
     },
     [id, type, isIntake],
+  );
+
+  const processAndAddPhoto = useCallback(
+    async (rawUri: string) => {
+      const capturedAt = new Date();
+      setIsStampingPhoto(true);
+      try {
+        const uri = await stampPhoto(rawUri, {
+          capturedAt,
+          jobLabel: getJobLabel(),
+        });
+        await addEvidence({
+          type: 'photo',
+          uri,
+          capturedAt: capturedAt.toISOString(),
+          displayTime: formatCaptureDisplayTime(capturedAt),
+        });
+      } finally {
+        setIsStampingPhoto(false);
+      }
+    },
+    [addEvidence, getJobLabel],
   );
 
   useFocusEffect(
@@ -214,13 +249,16 @@ export default function PhotoCaptureScreen() {
     });
     if (!result.canceled && result.assets[0]) {
       const asset = result.assets[0];
+      const capturedAt = new Date();
       if (media === 'photo') {
-        await addEvidence({ type: 'photo', uri: asset.uri });
+        await processAndAddPhoto(asset.uri);
       } else {
         await addEvidence({
           type: 'video',
           uri: asset.uri,
           fileName: asset.fileName || 'video_note.mp4',
+          capturedAt: capturedAt.toISOString(),
+          displayTime: formatCaptureDisplayTime(capturedAt),
         });
       }
     }
@@ -232,13 +270,13 @@ export default function PhotoCaptureScreen() {
       return;
     }
     const allowed = await ensureCameraPermissions();
-    if (!allowed || !cameraRef.current || !cameraReady || isCapturingPhoto) return;
+    if (!allowed || !cameraRef.current || !cameraReady || isProcessingPhoto) return;
 
     setIsCapturingPhoto(true);
     try {
       const photo = await cameraRef.current.takePictureAsync({ quality: 0.85 });
       if (photo?.uri) {
-        await addEvidence({ type: 'photo', uri: photo.uri });
+        await processAndAddPhoto(photo.uri);
       }
     } catch (err) {
       console.error('Photo capture error:', err);
@@ -292,10 +330,13 @@ export default function PhotoCaptureScreen() {
       setVideoRecordSeconds(0);
 
       if (result?.uri) {
+        const capturedAt = new Date();
         await addEvidence({
           type: 'video',
           uri: result.uri,
           fileName: result.uri.split('/').pop() || 'video_note.mp4',
+          capturedAt: capturedAt.toISOString(),
+          displayTime: formatCaptureDisplayTime(capturedAt),
         });
       }
     } catch (err) {
@@ -360,10 +401,13 @@ export default function PhotoCaptureScreen() {
       const uri = recordingRef.current.uri;
       recordingRef.current = null;
       if (uri) {
+        const capturedAt = new Date();
         await addEvidence({
           type: 'audio',
           uri,
           durationSec: Math.max(1, Math.floor((status.durationMillis ?? 0) / 1000)),
+          capturedAt: capturedAt.toISOString(),
+          displayTime: formatCaptureDisplayTime(capturedAt),
         });
       }
     } catch (err) {
@@ -455,7 +499,7 @@ export default function PhotoCaptureScreen() {
         type: item.type,
         fileName: item.fileName ?? `${item.type}-${item.id}`,
         uri: item.uri,
-        capturedAt: item.timestamp,
+        capturedAt: item.capturedAt,
         durationSec: item.durationSec,
       })),
     });
@@ -518,6 +562,12 @@ export default function PhotoCaptureScreen() {
           <View style={styles.recordingIndicator}>
             <View style={styles.recordingDot} />
             <Text style={styles.recordingText}>REC {formatTime(videoRecordSeconds)}</Text>
+          </View>
+        )}
+        {isStampingPhoto && (
+          <View style={styles.stampingOverlay}>
+            <ActivityIndicator color="#fff" size="large" />
+            <Text style={styles.stampingText}>Adding timestamp…</Text>
           </View>
         )}
         <Text style={styles.guideTextOverlay}>
@@ -659,7 +709,7 @@ export default function PhotoCaptureScreen() {
             onPress={handleCapture}
             style={styles.shutterButton}
             activeOpacity={0.8}
-            disabled={isCapturingPhoto || (showLiveCamera && !cameraReady && mode !== 'audio')}
+            disabled={isProcessingPhoto || (showLiveCamera && !cameraReady && mode !== 'audio')}
           >
             <View
               style={[
@@ -671,7 +721,7 @@ export default function PhotoCaptureScreen() {
                   : null,
               ]}
             >
-              {mode === 'photo' && (isCapturingPhoto ? (
+              {mode === 'photo' && (isProcessingPhoto ? (
                 <ActivityIndicator color="#000" />
               ) : (
                 <Camera size={24} color="#000" />
@@ -685,7 +735,7 @@ export default function PhotoCaptureScreen() {
           <TouchableOpacity
             onPress={handleSubmit}
             style={[styles.submitBtn, evidence.length === 0 && styles.submitBtnDisabled]}
-            disabled={isRecordingAudio || isRecordingVideo}
+            disabled={isRecordingAudio || isRecordingVideo || isProcessingPhoto}
           >
             <Check size={24} color="#FFF" />
           </TouchableOpacity>
@@ -794,6 +844,19 @@ const getStyles = (colors: any) =>
       fontSize: 14,
       fontWeight: '800',
       fontVariant: ['tabular-nums'],
+    },
+    stampingOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: 'rgba(0,0,0,0.45)',
+      gap: 10,
+      zIndex: 12,
+    },
+    stampingText: {
+      color: '#FFF',
+      fontSize: 14,
+      fontWeight: '700',
     },
     previewSection: { paddingHorizontal: 16, marginBottom: 4 },
     previewLabel: {

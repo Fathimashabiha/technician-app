@@ -18,6 +18,8 @@ export type AttendanceStatusDto = {
   priorShiftUnclosed?: boolean;
   shiftStartedAt?: string | null;
   shiftEndedAt?: string | null;
+  checkInLocation?: string | null;
+  checkOutLocation?: string | null;
 };
 
 export async function checkIn(location: AttendanceLocation, technicianName?: string) {

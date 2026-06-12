@@ -119,7 +119,7 @@ export default function AssetDetailsScreen() {
       setLoadError(null);
       const [loadedAsset, workOrders, manuals, ppmSchedules] = await Promise.all([
         fetchExternalAsset(String(assetId)),
-        fetchWorkOrders(),
+        fetchWorkOrders().catch(() => [] as WorkOrder[]),
         fetchAssetManuals(String(assetId)).catch(() => [] as AssetManual[]),
         listAssetPpmSchedules(String(assetId)).catch(() => [] as PpmSchedule[]),
       ]);

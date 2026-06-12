@@ -86,7 +86,8 @@
           "resizeMode": "contain",
           "backgroundColor": "#ffffff"
         }
-      ]
+      ],
+      "react-native-image-marker"
     ],
     "extra": {
       "eas": {

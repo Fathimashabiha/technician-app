@@ -1,13 +1,46 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { formatCaptureDisplayTime } from "./photoWatermark";
 
 export type EvidenceItem = {
   id: string;
   type: "photo" | "video" | "audio";
   uri: string;
-  timestamp: string;
+  capturedAt: string;
+  displayTime?: string;
   durationSec?: number;
   fileName?: string;
 };
+
+type StoredEvidenceItem = EvidenceItem & { timestamp?: string };
+
+function normalizeEvidenceItem(raw: StoredEvidenceItem): EvidenceItem {
+  if (raw.capturedAt) {
+    return {
+      id: raw.id,
+      type: raw.type,
+      uri: raw.uri,
+      capturedAt: raw.capturedAt,
+      displayTime: raw.displayTime ?? formatCaptureDisplayTime(new Date(raw.capturedAt)),
+      durationSec: raw.durationSec,
+      fileName: raw.fileName,
+    };
+  }
+
+  const capturedAt = new Date().toISOString();
+  return {
+    id: raw.id,
+    type: raw.type,
+    uri: raw.uri,
+    capturedAt,
+    displayTime: raw.timestamp ?? raw.displayTime ?? formatCaptureDisplayTime(new Date()),
+    durationSec: raw.durationSec,
+    fileName: raw.fileName,
+  };
+}
+
+function normalizeEvidenceList(items: StoredEvidenceItem[]): EvidenceItem[] {
+  return items.map(normalizeEvidenceItem);
+}
 
 const evidenceKey = (workOrderId: string, phase: "before" | "after") =>
   `@zenfix_evidence_${workOrderId}_${phase}`;
@@ -19,7 +52,7 @@ export async function loadEvidence(
   try {
     const raw = await AsyncStorage.getItem(evidenceKey(workOrderId, phase));
     if (!raw) return [];
-    return JSON.parse(raw) as EvidenceItem[];
+    return normalizeEvidenceList(JSON.parse(raw) as StoredEvidenceItem[]);
   } catch {
     return [];
   }
@@ -43,7 +76,7 @@ export async function loadIntakeEvidence(): Promise<EvidenceItem[]> {
   try {
     const raw = await AsyncStorage.getItem(INTAKE_EVIDENCE_KEY);
     if (!raw) return [];
-    return JSON.parse(raw) as EvidenceItem[];
+    return normalizeEvidenceList(JSON.parse(raw) as StoredEvidenceItem[]);
   } catch {
     return [];
   }

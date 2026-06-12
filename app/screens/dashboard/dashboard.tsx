@@ -49,6 +49,7 @@ import {
   Sun,
   Moon,
   Box,
+  MapPin,
 } from 'lucide-react-native';
 import { Button } from '@/components/ui/Button';
 import { StatusBadge } from '@/components/StatusBadge';
@@ -67,6 +68,7 @@ import {
 import {
   AttendanceLocationError,
   fetchAttendanceLocation,
+  formatAttendanceLocationName,
 } from '@/lib/attendanceLocation';
 import {
   getLocalShiftSession,
@@ -112,6 +114,8 @@ export default function DashboardScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [attendanceBusy, setAttendanceBusy] = useState(false);
   const [attendanceBusyLabel, setAttendanceBusyLabel] = useState('');
+  const [checkInLocationName, setCheckInLocationName] = useState<string | null>(null);
+  const [checkOutLocationName, setCheckOutLocationName] = useState<string | null>(null);
   const { workOrders, loading: woLoading, reload: reloadWorkOrders } = useWorkOrders();
   const [ppmSchedules, setPpmSchedules] = useState<PpmSchedule[]>([]);
   const [ppmLoading, setPpmLoading] = useState(false);
@@ -139,6 +143,11 @@ export default function DashboardScreen() {
         (status.lastCheckOut && new Date(status.lastCheckOut).getTime()) ||
         null;
 
+      const inLocation = status.checkInLocation ?? null;
+      const outLocation = status.checkOutLocation ?? null;
+      setCheckInLocationName(inLocation);
+      setCheckOutLocationName(outLocation);
+
       if (status.dayState === 'on_shift' && started) {
         setShiftStartedAt(started);
         setShiftEndedAt(null);
@@ -150,7 +159,12 @@ export default function DashboardScreen() {
           technicianId,
         );
         await saveLocalDayAttendance(
-          { dateKey: '', dayState: 'on_shift', startedAt: started },
+          {
+            dateKey: '',
+            dayState: 'on_shift',
+            startedAt: started,
+            checkInLocationName: inLocation ?? undefined,
+          },
           technicianId,
         );
         return;
@@ -171,6 +185,8 @@ export default function DashboardScreen() {
             dayState: 'checked_out',
             startedAt: started ?? undefined,
             endedAt: ended ?? undefined,
+            checkInLocationName: inLocation ?? undefined,
+            checkOutLocationName: outLocation ?? undefined,
           },
           technicianId,
         );
@@ -203,6 +219,8 @@ export default function DashboardScreen() {
       setShiftStartedAt(null);
       setShiftEndedAt(null);
       setElapsed(0);
+      setCheckInLocationName(null);
+      setCheckOutLocationName(null);
       await saveLocalShiftSession(false, undefined, undefined, technicianId);
     },
     [],
@@ -255,6 +273,8 @@ export default function DashboardScreen() {
       }
 
       setShiftPhase(localDay.dayState);
+      setCheckInLocationName(localDay.checkInLocationName ?? null);
+      setCheckOutLocationName(localDay.checkOutLocationName ?? null);
       if (localDay.dayState === 'on_shift' && localDay.startedAt) {
         setShiftStartedAt(localDay.startedAt);
         setShiftEndedAt(null);
@@ -549,6 +569,17 @@ export default function DashboardScreen() {
             {shiftPhase === 'can_check_in' ? '--:--:--' : formatTime(elapsed)}
           </Text>
 
+          {checkInLocationName ? (
+            <View style={dynamicStyles.shiftLocationRow}>
+              <MapPin size={14} color={isDark ? colors.secondary : colors.primary} />
+              <Text style={dynamicStyles.shiftLocationText} numberOfLines={2}>
+                {shiftPhase === 'checked_out' && checkOutLocationName
+                  ? `Checked in at ${checkInLocationName} · Out at ${checkOutLocationName}`
+                  : `Checked in at ${checkInLocationName}`}
+              </Text>
+            </View>
+          ) : null}
+
           {shiftPhase === 'checked_out' ? (
             <Text style={dynamicStyles.shiftHint}>
               You have checked out for today. Check in again tomorrow.
@@ -568,19 +599,28 @@ export default function DashboardScreen() {
                   setAttendanceBusyLabel('Getting location...');
                   const technicianId = getTechnicianSession()?.technicianId ?? 'T001';
                   const name = getTechnicianSession()?.name ?? 'Technician';
+                  let resolvedLocationName: string | null = null;
                   try {
                     const location = await fetchAttendanceLocation();
+                    resolvedLocationName = formatAttendanceLocationName(location);
                     setAttendanceBusyLabel('Checking in...');
                     const startedAt = Date.now();
                     await checkIn(location, name);
                     await saveLocalShiftSession(true, name, startedAt, technicianId);
                     await saveLocalDayAttendance(
-                      { dateKey: '', dayState: 'on_shift', startedAt },
+                      {
+                        dateKey: '',
+                        dayState: 'on_shift',
+                        startedAt,
+                        checkInLocationName: resolvedLocationName,
+                      },
                       technicianId,
                     );
                     setShiftPhase('on_shift');
                     setShiftStartedAt(startedAt);
                     setShiftEndedAt(null);
+                    setCheckInLocationName(resolvedLocationName);
+                    setCheckOutLocationName(null);
                     setElapsed(0);
                   } catch (err) {
                     if (err instanceof AttendanceLocationError) {
@@ -601,14 +641,25 @@ export default function DashboardScreen() {
                       void syncAttendance();
                       return;
                     }
+                    if (!resolvedLocationName) {
+                      Alert.alert('Location required', 'Could not get your current location.');
+                      return;
+                    }
                     const startedAt = Date.now();
                     await saveLocalShiftSession(true, name, startedAt, technicianId);
                     await saveLocalDayAttendance(
-                      { dateKey: '', dayState: 'on_shift', startedAt },
+                      {
+                        dateKey: '',
+                        dayState: 'on_shift',
+                        startedAt,
+                        checkInLocationName: resolvedLocationName,
+                      },
                       technicianId,
                     );
                     setShiftPhase('on_shift');
                     setShiftStartedAt(startedAt);
+                    setCheckInLocationName(resolvedLocationName);
+                    setCheckOutLocationName(null);
                     setElapsed(0);
                     Alert.alert(
                       'Checked in (offline)',
@@ -648,8 +699,10 @@ export default function DashboardScreen() {
                   setAttendanceBusyLabel('Getting location...');
                   const technicianId = getTechnicianSession()?.technicianId ?? 'T001';
                   const endedAt = Date.now();
+                  let resolvedCheckoutLocationName: string | null = null;
                   try {
                     const location = await fetchAttendanceLocation();
+                    resolvedCheckoutLocationName = formatAttendanceLocationName(location);
                     setAttendanceBusyLabel('Checking out...');
                     await checkOut(location);
                     await saveLocalShiftSession(false, undefined, undefined, technicianId);
@@ -659,10 +712,13 @@ export default function DashboardScreen() {
                         dayState: 'checked_out',
                         startedAt: shiftStartedAt ?? undefined,
                         endedAt,
+                        checkInLocationName: checkInLocationName ?? undefined,
+                        checkOutLocationName: resolvedCheckoutLocationName,
                       },
                       technicianId,
                     );
                     setShiftPhase('checked_out');
+                    setCheckOutLocationName(resolvedCheckoutLocationName);
                     setShiftEndedAt(endedAt);
                     if (shiftStartedAt) {
                       setElapsed(
@@ -687,10 +743,15 @@ export default function DashboardScreen() {
                         dayState: 'checked_out',
                         startedAt: shiftStartedAt ?? undefined,
                         endedAt,
+                        checkInLocationName: checkInLocationName ?? undefined,
+                        checkOutLocationName: resolvedCheckoutLocationName ?? undefined,
                       },
                       technicianId,
                     );
                     setShiftPhase('checked_out');
+                    if (resolvedCheckoutLocationName) {
+                      setCheckOutLocationName(resolvedCheckoutLocationName);
+                    }
                     setShiftEndedAt(endedAt);
                     Alert.alert('Checked out (offline)', message);
                   } finally {
@@ -1261,6 +1322,20 @@ const getStyles = (colors: any, isDark: boolean) => StyleSheet.create({
     fontWeight: '700',
     marginBottom: 16,
     fontVariant: ['tabular-nums'],
+  },
+  shiftLocationRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginTop: -8,
+    marginBottom: 12,
+  },
+  shiftLocationText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '600',
+    color: colors.mutedForeground,
   },
   shiftActions: { flexDirection: 'row', gap: 12 },
   checkInButton: { flex: 1, borderRadius: 12, overflow: 'hidden' },

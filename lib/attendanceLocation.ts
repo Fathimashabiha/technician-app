@@ -4,7 +4,8 @@ export type AttendanceLocation = {
   latitude: number;
   longitude: number;
   accuracy?: number;
-  address?: string;
+  /** Human-readable place name, e.g. "Business Bay, Dubai, UAE". */
+  address: string;
 };
 
 export class AttendanceLocationError extends Error {
@@ -14,27 +15,86 @@ export class AttendanceLocationError extends Error {
   }
 }
 
-async function resolveAddress(
+function uniqueParts(parts: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const part of parts) {
+    const value = part?.trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+
+  return result;
+}
+
+function buildPlaceName(place: Location.LocationGeocodedAddress): string {
+  const street = [place.streetNumber, place.street].filter(Boolean).join(' ').trim();
+  const locality = place.city || place.subregion || place.district;
+  const region = place.region;
+  const country = place.country;
+  const area = place.district || place.name;
+
+  const detailed = uniqueParts([
+    place.name && place.name !== street && place.name !== locality ? place.name : undefined,
+    street || undefined,
+    area && area !== locality ? area : undefined,
+    locality || undefined,
+    region && region !== locality ? region : undefined,
+    country && country !== locality && country !== region ? country : undefined,
+  ]);
+
+  if (detailed.length > 0) {
+    return detailed.join(', ');
+  }
+
+  const minimal = uniqueParts([locality, region, country]);
+  return minimal.join(', ');
+}
+
+async function resolvePlaceName(
   latitude: number,
   longitude: number,
-): Promise<string | undefined> {
+): Promise<string> {
+  let results: Location.LocationGeocodedAddress[];
   try {
-    const results = await Location.reverseGeocodeAsync({ latitude, longitude });
-    const place = results[0];
-    if (!place) return undefined;
-
-    const parts = [
-      place.name,
-      place.street,
-      place.city,
-      place.region,
-      place.country,
-    ].filter((part): part is string => !!part?.trim());
-
-    return parts.length > 0 ? parts.join(', ') : undefined;
+    results = await Location.reverseGeocodeAsync({ latitude, longitude });
   } catch {
-    return undefined;
+    throw new AttendanceLocationError(
+      'Could not determine your area name. Check your internet connection and try again.',
+    );
   }
+
+  if (!results.length) {
+    throw new AttendanceLocationError(
+      'Could not determine your area name. Move to an open area and try again.',
+    );
+  }
+
+  let bestName = '';
+  for (const place of results) {
+    const name = buildPlaceName(place);
+    if (name.length > bestName.length) {
+      bestName = name;
+    }
+  }
+
+  if (!bestName) {
+    throw new AttendanceLocationError(
+      'Could not determine your area name. Move to an open area and try again.',
+    );
+  }
+
+  return bestName;
+}
+
+export function formatAttendanceLocationName(
+  location: Pick<AttendanceLocation, 'address'>,
+): string {
+  return location.address.trim();
 }
 
 export async function fetchAttendanceLocation(): Promise<AttendanceLocation> {
@@ -64,7 +124,7 @@ export async function fetchAttendanceLocation(): Promise<AttendanceLocation> {
   }
 
   const { latitude, longitude, accuracy } = position.coords;
-  const address = await resolveAddress(latitude, longitude);
+  const address = await resolvePlaceName(latitude, longitude);
 
   return {
     latitude,
