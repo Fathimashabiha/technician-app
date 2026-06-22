@@ -56,6 +56,7 @@ import {
   type EvidenceItem,
 } from '@/lib/evidenceStorage';
 import { navigateAfterStep } from '@/lib/executionNavigation';
+import { evidenceUploadName } from '@/lib/mediaUpload';
 import { formatCaptureDisplayTime, stampPhoto } from '@/lib/photoWatermark';
 
 type MediaType = 'photo' | 'video' | 'audio';
@@ -497,7 +498,7 @@ export default function PhotoCaptureScreen() {
       evidence: evidence.map((item) => ({
         id: item.id,
         type: item.type,
-        fileName: item.fileName ?? `${item.type}-${item.id}`,
+        fileName: evidenceUploadName(item),
         uri: item.uri,
         capturedAt: item.capturedAt,
         durationSec: item.durationSec,
@@ -583,7 +584,18 @@ export default function PhotoCaptureScreen() {
 
   const renderThumbnail = (item: EvidenceItem) => {
     if (item.type === 'photo') {
-      return <Image source={{ uri: item.uri }} style={styles.evidenceImage} />;
+      return (
+        <>
+          <Image source={{ uri: item.uri }} style={styles.evidenceImage} />
+          {item.displayTime ? (
+            <View style={styles.thumbTimestampOverlay}>
+              <Text style={styles.thumbTimestampText} numberOfLines={2}>
+                {item.displayTime}
+              </Text>
+            </View>
+          ) : null}
+        </>
+      );
     }
     if (item.type === 'video') {
       return (
@@ -709,7 +721,7 @@ export default function PhotoCaptureScreen() {
             onPress={handleCapture}
             style={styles.shutterButton}
             activeOpacity={0.8}
-            disabled={isProcessingPhoto || (showLiveCamera && !cameraReady && mode !== 'audio')}
+            disabled={isProcessingPhoto || (showLiveCamera && !cameraReady)}
           >
             <View
               style={[
@@ -891,6 +903,22 @@ const getStyles = (colors: any) =>
       borderColor: 'rgba(255,255,255,0.25)',
     },
     evidenceImage: { width: '100%', height: '100%' },
+    thumbTimestampOverlay: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: 'rgba(0,0,0,0.88)',
+      paddingHorizontal: 4,
+      paddingVertical: 4,
+    },
+    thumbTimestampText: {
+      color: '#FFF',
+      fontSize: 9,
+      fontWeight: '800',
+      lineHeight: 11,
+      textAlign: 'center',
+    },
     evidenceIconWrap: {
       flex: 1,
       backgroundColor: '#333',

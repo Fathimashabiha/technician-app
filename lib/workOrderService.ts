@@ -1,4 +1,5 @@
 import { API_URL, ApiError, apiRequest } from './api';
+import { normalizeFileUri } from './mediaUpload';
 import { getAuthToken, getTechnicianId } from './technicianSession';
 import type {
   WorkOrder,
@@ -224,7 +225,7 @@ export async function completeWorkOrderStep(
     form.append('payload', JSON.stringify(payload ?? {}));
     for (const file of files) {
       form.append('files', {
-        uri: file.uri,
+        uri: normalizeFileUri(file.uri),
         name: file.name,
         type: file.type,
       } as unknown as Blob);
@@ -244,9 +245,12 @@ export async function completeWorkOrderStep(
         },
         body: form,
       });
-    } catch {
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Network request failed';
       throw new ApiError(
-        `Cannot reach server at ${API_URL}. Check backend is running and EXPO_PUBLIC_API_HOST if on a device.`
+        detail.includes('Network request failed')
+          ? `Photo upload failed. Check ${API_URL} is reachable and try again.`
+          : `Cannot reach server at ${API_URL}. ${detail}`,
       );
     }
 

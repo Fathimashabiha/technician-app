@@ -1,4 +1,5 @@
-import { apiRequest, API_URL } from './api';
+import { apiRequest, API_URL, ApiError } from './api';
+import { normalizeFileUri } from './mediaUpload';
 import { getTechnicianId, getTechnicianSession, getAuthToken } from './technicianSession';
 
 export type PpmSchedule = {
@@ -280,15 +281,34 @@ export async function completePpmStep(
     form.append('technicianId', getTechnicianId());
     form.append('payload', JSON.stringify(payload));
     for (const f of files) {
-      form.append('files', { uri: f.uri, name: f.name, type: f.type } as any);
+      form.append('files', {
+        uri: normalizeFileUri(f.uri),
+        name: f.name,
+        type: f.type,
+      } as unknown as Blob);
     }
-    const res = await fetch(url, {
-      method: 'POST',
-      body: form,
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        body: form,
+        headers: {
+          Accept: 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Network request failed';
+      throw new ApiError(
+        detail.includes('Network request failed')
+          ? `Photo upload failed. Check ${API_URL} is reachable and try again.`
+          : `Cannot reach server at ${API_URL}. ${detail}`,
+      );
+    }
     const json = await res.json() as { ok: boolean; data?: PpmScheduleDetail; error?: string };
-    if (!json.ok) throw new Error(json.error ?? 'Upload failed');
+    if (!res.ok || !json.ok) {
+      throw new ApiError(json.error ?? `Upload failed (${res.status})`, res.status);
+    }
     return json.data as PpmScheduleDetail;
   }
 

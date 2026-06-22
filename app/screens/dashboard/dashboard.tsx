@@ -569,14 +569,24 @@ export default function DashboardScreen() {
             {shiftPhase === 'can_check_in' ? '--:--:--' : formatTime(elapsed)}
           </Text>
 
-          {checkInLocationName ? (
-            <View style={dynamicStyles.shiftLocationRow}>
-              <MapPin size={14} color={isDark ? colors.secondary : colors.primary} />
-              <Text style={dynamicStyles.shiftLocationText} numberOfLines={2}>
-                {shiftPhase === 'checked_out' && checkOutLocationName
-                  ? `Checked in at ${checkInLocationName} · Out at ${checkOutLocationName}`
-                  : `Checked in at ${checkInLocationName}`}
-              </Text>
+          {(checkInLocationName || (shiftPhase === 'checked_out' && checkOutLocationName)) ? (
+            <View style={dynamicStyles.shiftLocationStack}>
+              {checkInLocationName ? (
+                <View style={dynamicStyles.shiftLocationRow}>
+                  <MapPin size={14} color={isDark ? colors.secondary : colors.primary} />
+                  <Text style={dynamicStyles.shiftLocationText} numberOfLines={2}>
+                    Checked in at {checkInLocationName}
+                  </Text>
+                </View>
+              ) : null}
+              {shiftPhase === 'checked_out' && checkOutLocationName ? (
+                <View style={dynamicStyles.shiftLocationRow}>
+                  <MapPin size={14} color={isDark ? colors.secondary : colors.primary} />
+                  <Text style={dynamicStyles.shiftLocationText} numberOfLines={2}>
+                    Checked out at {checkOutLocationName}
+                  </Text>
+                </View>
+              ) : null}
             </View>
           ) : null}
 
@@ -604,24 +614,8 @@ export default function DashboardScreen() {
                     const location = await fetchAttendanceLocation();
                     resolvedLocationName = formatAttendanceLocationName(location);
                     setAttendanceBusyLabel('Checking in...');
-                    const startedAt = Date.now();
                     await checkIn(location, name);
-                    await saveLocalShiftSession(true, name, startedAt, technicianId);
-                    await saveLocalDayAttendance(
-                      {
-                        dateKey: '',
-                        dayState: 'on_shift',
-                        startedAt,
-                        checkInLocationName: resolvedLocationName,
-                      },
-                      technicianId,
-                    );
-                    setShiftPhase('on_shift');
-                    setShiftStartedAt(startedAt);
-                    setShiftEndedAt(null);
-                    setCheckInLocationName(resolvedLocationName);
-                    setCheckOutLocationName(null);
-                    setElapsed(0);
+                    await syncAttendance();
                   } catch (err) {
                     if (err instanceof AttendanceLocationError) {
                       Alert.alert('Location required', err.message);
@@ -704,27 +698,9 @@ export default function DashboardScreen() {
                     const location = await fetchAttendanceLocation();
                     resolvedCheckoutLocationName = formatAttendanceLocationName(location);
                     setAttendanceBusyLabel('Checking out...');
-                    await checkOut(location);
-                    await saveLocalShiftSession(false, undefined, undefined, technicianId);
-                    await saveLocalDayAttendance(
-                      {
-                        dateKey: '',
-                        dayState: 'checked_out',
-                        startedAt: shiftStartedAt ?? undefined,
-                        endedAt,
-                        checkInLocationName: checkInLocationName ?? undefined,
-                        checkOutLocationName: resolvedCheckoutLocationName,
-                      },
-                      technicianId,
-                    );
-                    setShiftPhase('checked_out');
                     setCheckOutLocationName(resolvedCheckoutLocationName);
-                    setShiftEndedAt(endedAt);
-                    if (shiftStartedAt) {
-                      setElapsed(
-                        Math.max(0, Math.floor((endedAt - shiftStartedAt) / 1000)),
-                      );
-                    }
+                    await checkOut(location);
+                    await syncAttendance();
                   } catch (err) {
                     if (err instanceof AttendanceLocationError) {
                       Alert.alert('Location required', err.message);
@@ -1323,12 +1299,15 @@ const getStyles = (colors: any, isDark: boolean) => StyleSheet.create({
     marginBottom: 16,
     fontVariant: ['tabular-nums'],
   },
+  shiftLocationStack: {
+    gap: 6,
+    marginTop: -8,
+    marginBottom: 12,
+  },
   shiftLocationRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 8,
-    marginTop: -8,
-    marginBottom: 12,
   },
   shiftLocationText: {
     flex: 1,

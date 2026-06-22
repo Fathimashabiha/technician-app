@@ -23,6 +23,7 @@ import { Card } from '@/components/ui/Card';
 import { SHADOWS, useTheme } from '@/app/constants/theme';
 import { LinearGradient } from 'expo-linear-gradient';
 import { ppmStepNavParams } from '@/lib/executionNavigation';
+import { prepareEvidenceUploadFiles } from '@/lib/mediaUpload';
 import {
   getPpmScheduleDetail,
   startPpmExecution,
@@ -291,23 +292,9 @@ export default function PpmExecutionDetails() {
         const payload = buildPpmStepPayloadFromUi(p, stepId);
         const uploadFiles =
           stepId === 'before_photos' || stepId === 'after_photos'
-            ? ((p.evidence as Array<Record<string, unknown>> | undefined) ?? [])
-                .filter((item) => typeof item?.uri === 'string' && item.uri)
-                .map((item) => {
-                  const mediaType =
-                    item.type === 'video' ? 'video' : item.type === 'audio' ? 'audio' : 'photo';
-                  const mime =
-                    mediaType === 'video'
-                      ? 'video/mp4'
-                      : mediaType === 'audio'
-                        ? 'audio/m4a'
-                        : 'image/jpeg';
-                  return {
-                    uri: String(item.uri),
-                    name: String(item.fileName ?? `${mediaType}-${item.id ?? Date.now()}`),
-                    type: mime,
-                  };
-                })
+            ? await prepareEvidenceUploadFiles(
+                p.evidence as Array<Record<string, unknown>> | undefined,
+              )
             : undefined;
 
         await completePpmStep(scheduleId, stepId, payload, uploadFiles);

@@ -27,6 +27,7 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { Card } from '@/components/ui/Card';
 import { COLORS, GRADIENTS, SHADOWS, useTheme } from '@/app/constants/theme';
 import { LinearGradient } from 'expo-linear-gradient';
+import { prepareEvidenceUploadFiles } from '@/lib/mediaUpload';
 import {
   buildStepPayloadFromUi,
   completeWorkOrder,
@@ -251,40 +252,23 @@ export default function WorkOrderDetails() {
       const stepId = p.stepCompleted;
 
       // Persist every completed step. For evidence steps, upload actual media files.
-      try {
-        const payload = buildStepPayloadFromUi(p, stepId, wo?.assetId);
-        const uploadFiles =
-          stepId === 'before_photos' || stepId === 'after_photos'
-            ? ((p?.evidence as Array<Record<string, unknown>> | undefined) ?? [])
-                .filter((item) => typeof item?.uri === 'string' && item.uri)
-                .map((item) => {
-                  const mediaType =
-                    item.type === 'video'
-                      ? 'video'
-                      : item.type === 'audio'
-                        ? 'audio'
-                        : 'photo';
-                  const mime =
-                    mediaType === 'video'
-                      ? 'video/mp4'
-                      : mediaType === 'audio'
-                        ? 'audio/m4a'
-                        : 'image/jpeg';
-                  return {
-                    uri: String(item.uri),
-                    name: String(item.fileName ?? `${mediaType}-${item.id ?? Date.now()}`),
-                    type: mime,
-                  };
-                })
-            : undefined;
+      void (async () => {
+        try {
+          const payload = buildStepPayloadFromUi(p, stepId, wo?.assetId);
+          const uploadFiles =
+            stepId === 'before_photos' || stepId === 'after_photos'
+              ? await prepareEvidenceUploadFiles(
+                  p?.evidence as Array<Record<string, unknown>> | undefined,
+                )
+              : undefined;
 
-        void completeWorkOrderStep(id, stepId, payload, uploadFiles).catch((error: any) => {
-          const message = error?.message || 'Unable to save step to server.';
+          await completeWorkOrderStep(id, stepId, payload, uploadFiles);
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error ? error.message : 'Unable to save step to server.';
           Alert.alert('Sync failed', message);
-        });
-      } catch (error: any) {
-        Alert.alert('Sync failed', error?.message || 'Unable to save step to server.');
-      }
+        }
+      })();
       
       if (p.checklistResult) {
         setChecklistResult(p.checklistResult);
